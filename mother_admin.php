@@ -127,6 +127,8 @@ if ($runSchemaMigrations) try {
     safeAddCol($pdo, 'product_plans', 'reseller_discount_percent', 'DECIMAL(5,2) DEFAULT 0.00');
     safeAddCol($pdo, 'products', 'maintenance_msg', 'TEXT NULL');
     safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'products', 'reset_enabled', 'TINYINT(1) NOT NULL DEFAULT 1');
+    safeAddCol($pdo, 'products', 'km_api_id', 'INT NOT NULL DEFAULT 0');
     safeAddCol($pdo, 'product_plans', 'reward_coins', 'INT DEFAULT 0');
     safeAddCol($pdo, 'product_plans', 'coin_price', 'INT DEFAULT 0');
 
@@ -1105,6 +1107,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     }
 
 
+
+    // 🔄 PRODUCT RESET PERMISSION TOGGLE
+    if ($act === 'toggle_product_reset') {
+        $prodId = (int)($_POST['product_id'] ?? 0);
+        $turnOn = ($_POST['reset_state'] ?? '') === '1';
+        if ($prodId > 0) {
+            $pdo->prepare("UPDATE products SET reset_enabled = ? WHERE id = ? AND subdomain_id = 0")->execute([$turnOn ? 1 : 0, $prodId]);
+            $toast = ['type' => 'success', 'msg' => $turnOn ? '🔄 HWID Reset ENABLED for this product' : '⛔ HWID Reset DISABLED for this product'];
+        }
+    }
     // 🔧 QUICK PRODUCT MAINTENANCE TOGGLE (প্রোডাক্ট লিস্ট থেকে এক ক্লিকে)
     if ($act === 'toggle_product_maintenance') {
         $prodId   = (int)($_POST['product_id'] ?? 0);
@@ -1157,6 +1169,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
             $maintMsgEdit = trim($_POST['maintenance_msg'] ?? '');
             $pdo->prepare("UPDATE products SET is_maintenance = ?, maintenance_msg = ? WHERE id = ? AND subdomain_id = 0")
                 ->execute([$isActive ? 0 : 1, $maintMsgEdit !== '' ? $maintMsgEdit : null, $prodId]);
+        } catch (Throwable $e) {}
+        // 🔄 Reset permission + Reset API ID
+        try {
+            if (isset($_POST['reset_form_present'])) {
+                $pdo->prepare("UPDATE products SET reset_enabled = ?, km_api_id = ? WHERE id = ? AND subdomain_id = 0")
+                    ->execute([isset($_POST['reset_enabled']) ? 1 : 0, max(0, (int)($_POST['km_api_id'] ?? 0)), $prodId]);
+            }
         } catch (Throwable $e) {}
 
         try {
@@ -3133,6 +3152,16 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                 <button type="submit" class="py-2 px-3 rounded-lg font-black text-[11px] uppercase tracking-wider whitespace-nowrap transition <?= $isProdActive ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950' ?>">
                                     <?= $isProdActive ? '🔧 Maintenance' : '✅ Go Online' ?>
                                 </button>
+                            </form>
+
+                            <?php $isResetOn = (int)($prod['reset_enabled'] ?? 1) === 1; ?>
+                            <form method="POST" class="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-xl bg-slate-900/60 border <?= $isResetOn ? 'border-cyan-500/30' : 'border-slate-800' ?>">
+                                <input type="hidden" name="admin_action" value="toggle_product_reset">
+                                <input type="hidden" name="active_tab" value="tab-products">
+                                <input type="hidden" name="product_id" value="<?= (int)$prod['id'] ?>">
+                                <input type="hidden" name="reset_state" value="<?= $isResetOn ? '0' : '1' ?>">
+                                <span class="text-[11px] font-bold <?= $isResetOn ? 'text-cyan-300' : 'text-slate-500' ?>">🔄 HWID Reset: <?= $isResetOn ? 'ALLOWED' : 'OFF' ?></span>
+                                <button type="submit" class="py-1 px-2.5 rounded-lg text-[10px] font-black uppercase <?= $isResetOn ? 'bg-slate-800 text-slate-300 hover:bg-slate-700' : 'bg-cyan-500 text-slate-950 hover:bg-cyan-400' ?>"><?= $isResetOn ? 'Turn Off' : 'Allow Reset' ?></button>
                             </form>
 
                             <div id="plan-accordion-<?= $prod['id'] ?>" class="hidden pt-3 border-t border-slate-800 space-y-2">
@@ -5146,6 +5175,18 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                     </label>
                 </div>
 
+                <input type="hidden" name="reset_form_present" value="1">
+                <div class="p-3 rounded-xl bg-[#030612] border border-cyan-500/20 grid grid-cols-1 sm:grid-cols-2 gap-2.5 items-center">
+                    <label class="flex items-center justify-between gap-2 cursor-pointer">
+                        <span class="text-white font-bold text-xs">🔄 HWID Reset Allowed</span>
+                        <input type="checkbox" id="editModalResetEnabled" name="reset_enabled" value="1" class="rounded scale-110">
+                    </label>
+                    <div class="flex items-center gap-2">
+                        <span class="text-slate-400 text-[11px] whitespace-nowrap">Reset API ID</span>
+                        <input type="number" min="0" id="editModalKmApiId" name="km_api_id" placeholder="0 = default KM" class="w-full min-w-0 bg-slate-900 border border-slate-800 p-2 rounded-lg text-cyan-300 outline-none text-xs">
+                    </div>
+                </div>
+
                 <div class="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
                     <div class="sm:col-span-2">
                         <label class="text-slate-400 block mb-1">Product Title</label>
@@ -5825,6 +5866,8 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
             document.getElementById('editModalTags').value = prod.tags || '';
             document.getElementById('editModalDesc').value = prod.description || '';
             document.getElementById('editModalMaintMsg').value = prod.maintenance_msg || '';
+            if (document.getElementById('editModalResetEnabled')) document.getElementById('editModalResetEnabled').checked = (prod.reset_enabled === undefined || prod.reset_enabled === null) ? true : (parseInt(prod.reset_enabled) === 1);
+            if (document.getElementById('editModalKmApiId')) document.getElementById('editModalKmApiId').value = parseInt(prod.km_api_id || 0) || '';
             document.getElementById('editModalIsPinned').checked = (parseInt(prod.is_pinned) === 1);
 
             const isActive = (parseInt(prod.is_active) === 1) && (parseInt(prod.is_maintenance || 0) !== 1);

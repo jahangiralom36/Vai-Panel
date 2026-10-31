@@ -346,6 +346,9 @@ if ($runSchemaMigrations) try {
     // ২. প্রোডাক্ট কাস্টম মেইনটেনেন্স মেসেজ কলাম
     safeAddCol($pdo, 'products', 'maintenance_msg', 'TEXT NULL');
     safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'products', 'reset_enabled', 'TINYINT(1) NOT NULL DEFAULT 1');
+    safeAddCol($pdo, 'products', 'km_api_id', 'INT NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'licenses', 'plan_id', 'INT NULL');
     
     // ৩. প্রোফাইল পিকচার ও অবতার ডিরেক্টরি নিশ্চিত করা
     $avatarDir = __DIR__ . '/uploads/avatars/';
@@ -2001,15 +2004,28 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
     }
 
     // ── Key ownership check ──
-   $stmtKey = $pdo->prepare("SELECT l.*, p.km_api_id as api_id 
-                           FROM licenses l
-                           LEFT JOIN products p ON p.id = l.product_id
-                           WHERE l.user_id = ? AND l.license_key = ? AND l.subdomain_id = ? LIMIT 1");
-$stmtKey->execute([$user['id'], $rawKey, $currentSubdomainId]); 
-    $keyRow = $stmtKey->fetch(PDO::FETCH_ASSOC);
+    // (আগে p.km_api_id কলাম না থাকায় এই কুয়েরি ক্র্যাশ করত — রিসেট একদম কাজ করত না)
+    $keyRow = false;
+    try {
+        $stmtKey = $pdo->prepare("SELECT l.*, COALESCE(p.km_api_id, 0) as api_id, COALESCE(p.reset_enabled, 1) as reset_enabled, p.name as product_name
+                               FROM licenses l
+                               LEFT JOIN products p ON p.id = l.product_id
+                               WHERE l.user_id = ? AND l.license_key = ? AND l.subdomain_id = ? LIMIT 1");
+        $stmtKey->execute([$user['id'], $rawKey, $currentSubdomainId]);
+        $keyRow = $stmtKey->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        $stmtKey = $pdo->prepare("SELECT l.*, 0 as api_id, 1 as reset_enabled FROM licenses l WHERE l.user_id = ? AND l.license_key = ? AND l.subdomain_id = ? LIMIT 1");
+        $stmtKey->execute([$user['id'], $rawKey, $currentSubdomainId]);
+        $keyRow = $stmtKey->fetch(PDO::FETCH_ASSOC);
+    }
 
     if (!$keyRow) {
         echo json_encode(['status' => 'error', 'message' => 'License key not found in your account on this store!']);
+        exit;
+    }
+
+    if ((int)($keyRow['reset_enabled'] ?? 1) !== 1) {
+        echo json_encode(['status' => 'error', 'message' => '❌ ' . (($keyRow['product_name'] ?? '') ?: 'This product') . ' does not support HWID reset.']);
         exit;
     }
 
@@ -2525,7 +2541,7 @@ $discoveredFromProducts = [];
 try {
     if ($tenant) {
         $sql = "SELECT p.id as product_id, p.name as product_name, p.image_url, p.logo_url, p.banner_url, 
-                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, p.is_maintenance, p.maintenance_msg, 
+                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, p.is_maintenance, p.maintenance_msg, p.reset_enabled, 
                        p.app_download_url,
                        pl.id as plan_id, 
                        COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as validity, 
@@ -2544,7 +2560,7 @@ try {
         $stmtProds->execute([$currentSubdomainId]);
     } else {
         $sql = "SELECT p.id as product_id, p.name as product_name, p.image_url, p.logo_url, p.banner_url, 
-                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, p.is_maintenance, p.maintenance_msg, 
+                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, p.is_maintenance, p.maintenance_msg, p.reset_enabled, 
                        p.app_download_url,
                        pl.id as plan_id, 
                        COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as validity, 
@@ -2663,6 +2679,7 @@ try {
                 'is_active'        => $prodActiveStatus,
                 'is_maintenance'   => (int)($dp['is_maintenance'] ?? 0),
                 'maintenance_msg'  => trim((string)($dp['maintenance_msg'] ?? '')),
+                'reset_enabled'    => (int)($dp['reset_enabled'] ?? 1),
                 'logo_url'         => $logo,
                 'banner_url'       => $banner,
                 'description'      => $desc,
@@ -2761,7 +2778,7 @@ if ($isLoggedIn) {
         $stmtTrx->execute([$user['id'], $currentSubdomainId]);
         $deposits = $stmtTrx ? $stmtTrx->fetchAll(PDO::FETCH_ASSOC) : [];
 
-        $stmtAllKeys = $pdo->prepare("SELECT license_key, validity FROM licenses WHERE user_id = ? AND subdomain_id = ? ORDER BY id DESC");
+        $stmtAllKeys = $pdo->prepare("SELECT license_key, validity, product_id, created_at FROM licenses WHERE user_id = ? AND subdomain_id = ? ORDER BY id DESC");
         $stmtAllKeys->execute([$user['id'], $currentSubdomainId]);
         $userAllResetKeys = $stmtAllKeys ? $stmtAllKeys->fetchAll(PDO::FETCH_ASSOC) : [];
     } catch (Throwable $e) {}
@@ -3334,6 +3351,8 @@ if ($isFirebaseEnabled) {
             box-shadow: 0 0 60px rgba(217, 70, 239, 0.5);
         }
 
+        :root { color-scheme: dark; }
+        select, option { background-color: #070210; color: #e5e7eb; }
         /* ===== HEADER COLOR SYSTEM ===== */
         .hdr-store-name { color: #ffffff; text-shadow: 0 0 4px rgba(255,255,255,.55), 0 0 10px rgba(0,245,255,.45), 0 0 18px rgba(217,70,239,.30); }
         .hdr-portal-label { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.55); }
@@ -4034,6 +4053,53 @@ if ($isFirebaseEnabled) {
                     </h2>
                     <p class="text-[10px] text-purple-300/70 mt-0.5 font-sans">Unlink active license key from previous device</p>
                 </div>
+
+                <?php
+                // 🔄 FF-PANEL STYLE: কোন কোন প্রোডাক্ট রিসেট দেওয়া যাবে — সামনে দেখাবে
+                $resetKeyCountByProd = [];
+                foreach ($userAllResetKeys as $__rk) {
+                    $__pid = (int)($__rk['product_id'] ?? 0);
+                    $resetKeyCountByProd[$__pid] = ($resetKeyCountByProd[$__pid] ?? 0) + 1;
+                }
+                $resettableProducts = [];
+                $nonResettableNames = [];
+                foreach ($catalogProducts as $__cp) {
+                    if ((int)($__cp['reset_enabled'] ?? 1) === 1) $resettableProducts[] = $__cp;
+                    else $nonResettableNames[] = $__cp['name'];
+                }
+                ?>
+                <?php if (!empty($resettableProducts)): ?>
+                <div class="space-y-2">
+                    <div class="flex items-center justify-between">
+                        <span class="text-[10px] font-black text-cyan-300 uppercase tracking-wider flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Reset Available For</span>
+                        <span class="text-[9px] text-gray-500 font-sans">Tap a product</span>
+                    </div>
+                    <div class="grid grid-cols-3 gap-2" id="resetProdGrid">
+                        <?php foreach ($resettableProducts as $rp):
+                            $rpCount = (int)($resetKeyCountByProd[(int)$rp['id']] ?? 0);
+                            $rpLogo  = !empty($rp['logo_url']) ? $rp['logo_url'] : ($rp['banner_url'] ?? '');
+                        ?>
+                            <button type="button" onclick="selectResetProduct(<?= (int)$rp['id'] ?>)" data-reset-prod="<?= (int)$rp['id'] ?>" data-name="<?= htmlspecialchars($rp['name']) ?>" class="reset-prod-card relative flex flex-col items-center gap-1.5 p-2 rounded-2xl bg-[#0b0418] border border-cyan-500/25 hover:border-cyan-400 active:scale-95 transition text-center">
+                                <div class="w-11 h-11 rounded-xl overflow-hidden bg-gradient-to-tr from-cyan-600 to-fuchsia-600 flex items-center justify-center text-white font-black text-sm border border-cyan-400/40">
+                                    <?php if (!empty($rpLogo)): ?>
+                                        <img loading="lazy" decoding="async" src="<?= htmlspecialchars($rpLogo) ?>" alt="" class="w-full h-full object-cover">
+                                    <?php else: ?>
+                                        <?= htmlspecialchars(strtoupper(mb_substr($rp['name'], 0, 1))) ?>
+                                    <?php endif; ?>
+                                </div>
+                                <span class="text-[9px] font-bold text-white leading-tight line-clamp-2 font-sans w-full"><?= htmlspecialchars($rp['name']) ?></span>
+                                <span class="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded-full <?= $rpCount > 0 ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30' : 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20' ?>">
+                                    <?= $isLoggedIn ? ($rpCount > 0 ? $rpCount . ' KEY' . ($rpCount > 1 ? 'S' : '') : 'RESET ✓') : 'RESET ✓' ?>
+                                </span>
+                            </button>
+                        <?php endforeach; ?>
+                    </div>
+                    <?php if (!empty($nonResettableNames)): ?>
+                        <p class="text-[9px] text-gray-500 font-sans leading-snug">⛔ Reset not available: <?= htmlspecialchars(implode(', ', $nonResettableNames)) ?></p>
+                    <?php endif; ?>
+                    <div id="resetProdKeysBox" class="hidden rounded-2xl border border-cyan-500/30 bg-[#070210] p-2.5 space-y-1.5"></div>
+                </div>
+                <?php endif; ?>
 
                 <?php if (!$isLoggedIn): ?>
                     <div class="text-center py-10 space-y-2.5 text-xs">
@@ -6468,6 +6534,41 @@ document.addEventListener('DOMContentLoaded', function() {
             }, 250);
         }
 
+
+        // ===================== 🔄 RESET: PRODUCT GRID (FF PANEL STYLE) =====================
+        function escapeHtmlRs(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+        function selectResetProduct(prodId) {
+            if (!isUserLoggedIn) { openAuthModal('login'); showToast('Please login to reset your key!', 'error'); return; }
+            document.querySelectorAll('.reset-prod-card').forEach(c => {
+                const on = parseInt(c.dataset.resetProd) === prodId;
+                c.classList.toggle('border-cyan-400', on);
+                c.classList.toggle('shadow-[0_0_12px_rgba(0,245,255,0.35)]', on);
+            });
+            const card = document.querySelector('.reset-prod-card[data-reset-prod="' + prodId + '"]');
+            const prodName = card ? card.dataset.name : 'Product';
+            const box = document.getElementById('resetProdKeysBox');
+            const keys = allUserResetKeys.filter(k => parseInt(k.product_id || 0) === prodId);
+            let html = `<div class="flex items-center justify-between text-[10px] font-bold"><span class="text-cyan-300 uppercase">${escapeHtmlRs(prodName)} — Your Keys</span><button type="button" onclick="document.getElementById('resetProdKeysBox').classList.add('hidden')" class="text-gray-500 hover:text-white">✕</button></div>`;
+            if (!keys.length) {
+                html += `<p class="text-[10px] text-gray-400 font-sans py-2 text-center">এই প্রোডাক্টের কোনো কি আপনার অর্ডারে নেই। নিচে ম্যানুয়ালি কি পেস্ট করেও রিসেট দিতে পারেন।</p>`;
+            } else {
+                keys.forEach((k, i) => {
+                    html += `<div class="flex items-center justify-between gap-2 p-2 rounded-xl bg-[#0d061c] border border-[#241040]">
+                        <div class="min-w-0"><span class="block text-[11px] text-white font-mono font-bold truncate">${escapeHtmlRs(k.license_key)}</span><span class="text-[9px] text-gray-400">${escapeHtmlRs(k.validity || 'Key')}</span></div>
+                        <button type="button" data-key-idx="${i}" class="reset-one-btn flex-shrink-0 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 text-gray-950 text-[10px] font-black uppercase active:scale-95">Reset</button>
+                    </div>`;
+                });
+            }
+            box.innerHTML = html;
+            box.classList.remove('hidden');
+            box.querySelectorAll('.reset-one-btn').forEach(b => b.addEventListener('click', () => {
+                const k = keys[parseInt(b.dataset.keyIdx)];
+                if (!k) return;
+                document.getElementById('resetKeySearchInput').value = k.license_key;
+                document.getElementById('liveResetForm').requestSubmit();
+            }));
+            box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+        }
         // ===================== KEY RESET =====================
         function onResetSearchInput(query) {
             const resultsBox = document.getElementById('resetSearchResultsBox');
