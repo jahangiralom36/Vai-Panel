@@ -8,7 +8,14 @@
 ini_set('display_errors', '0');
 error_reporting(E_ALL);
 
-if (ob_get_level() === 0) {
+// ⚡ SPEED: HTML gzip (≈260KB → ≈45KB) — সার্ভার আগে থেকে কমপ্রেস করলে এটা বন্ধ থাকে।
+// (বেশিরভাগ হোস্টিং এ আগে থেকেই একটা output buffer খোলা থাকে, তাই level চেক না করে উপরে আরেকটা বাফার খোলা হয়)
+$vpCanGzip = !ini_get('zlib.output_compression') && extension_loaded('zlib') && !headers_sent()
+    && stripos((string)($_SERVER['HTTP_ACCEPT_ENCODING'] ?? ''), 'gzip') !== false
+    && empty($_POST) && !isset($_GET['pwa_manifest']);
+if ($vpCanGzip) {
+    ob_start('ob_gzhandler');
+} elseif (ob_get_level() === 0) {
     ob_start();
 }
 
@@ -585,13 +592,40 @@ if ($tenant) {
     } catch (Throwable $e) {}
 }
 
-$storeTitleName = !empty($tenant['site_title']) 
-    ? $tenant['site_title'] 
-    : (!empty($settings['site_name']) ? $settings['site_name'] : 'Store');
+// 🔒 মেইন ও সাব-ডোমেইন আলাদা: সাব-ডোমেইন কখনো মেইন স্টোরের নাম/লোগো দেখাবে না
+if ($tenant) {
+    $tenantOwnSettings = $tenantSettings ?? [];
+    $storeTitleName = !empty($tenant['site_title']) ? $tenant['site_title']
+        : (!empty($tenantOwnSettings['site_name']) ? $tenantOwnSettings['site_name']
+        : strtoupper((string)$tenant['subdomain']) . ' STORE');
+    $storeLogoUrl = !empty($tenant['site_logo']) ? $tenant['site_logo']
+        : (!empty($tenantOwnSettings['site_logo']) ? $tenantOwnSettings['site_logo'] : '');
+} else {
+    $storeTitleName = !empty($settings['site_name']) ? $settings['site_name'] : 'Store';
+    $storeLogoUrl   = !empty($settings['site_logo']) ? $settings['site_logo'] : '';
+}
 
-$storeLogoUrl = !empty($tenant['site_logo']) 
-    ? $tenant['site_logo'] 
-    : (!empty($settings['site_logo']) ? $settings['site_logo'] : '');
+// 📱 PER-STORE PWA MANIFEST — প্রতিটা ডোমেইন নিজের নাম/লোগো/রং দিয়ে অ্যাপ হিসেবে ইনস্টল হবে
+if (isset($_GET['pwa_manifest'])) {
+    while (ob_get_level()) { ob_end_clean(); }
+    header('Content-Type: application/manifest+json; charset=utf-8');
+    header('Cache-Control: public, max-age=3600');
+    $mfIcon = !empty($storeLogoUrl) ? $storeLogoUrl : 'https://cdn-icons-png.flaticon.com/512/266/266033.png';
+    echo json_encode([
+        'name'             => $storeTitleName,
+        'short_name'       => mb_substr($storeTitleName, 0, 12),
+        'start_url'        => '/index.php',
+        'scope'            => '/',
+        'display'          => 'standalone',
+        'background_color' => '#04010a',
+        'theme_color'      => '#04010a',
+        'icons'            => [
+            ['src' => $mfIcon, 'sizes' => '192x192', 'type' => 'image/png', 'purpose' => 'any'],
+            ['src' => $mfIcon, 'sizes' => '512x512', 'type' => 'image/png', 'purpose' => 'any'],
+        ],
+    ], JSON_UNESCAPED_UNICODE | JSON_UNESCAPED_SLASHES);
+    exit;
+}
 
 $adminRate         = max(1.0, (float)$settings['usdt_rate']);
 $binanceMarketRate = max(1.0, (float)($settings['binance_market_rate'] ?? 125.0));
@@ -731,9 +765,10 @@ if (!function_exists('vpGetResetProducts')) {
 if (!function_exists('sendTelegramBotNotification')) {
     function sendTelegramBotNotification(PDO $pdo, int $subdomainId, string $eventType, string $message): bool {
         try {
+            // 🔒 প্রতিটা স্টোর শুধু নিজের বটে নোটিফিকেশন পাঠাবে (আগে সাব-ডোমেইনের অর্ডার মেইন বটে যেত)
             $stmtBot = $pdo->prepare("SELECT * FROM telegram_bot_config 
-                WHERE (subdomain_id = ? OR subdomain_id = 0) AND is_active = 1 
-                ORDER BY subdomain_id DESC LIMIT 1");
+                WHERE subdomain_id = ? AND is_active = 1 
+                LIMIT 1");
             $stmtBot->execute([$subdomainId]);
             $bot = $stmtBot->fetch(PDO::FETCH_ASSOC);
 
@@ -2614,11 +2649,7 @@ try {
         $stmtPM->execute([$currentSubdomainId]);
         $activePaymentMethods = $stmtPM->fetchAll(PDO::FETCH_ASSOC);
 
-        if (empty($activePaymentMethods)) {
-            $stmtPM_def = $pdo->prepare("SELECT * FROM payment_methods WHERE subdomain_id = 0 AND is_active = 1 ORDER BY sort_order ASC, id ASC");
-            $stmtPM_def->execute();
-            $activePaymentMethods = $stmtPM_def->fetchAll(PDO::FETCH_ASSOC);
-        }
+        // 🔒 সাব-ডোমেইনের নিজের মেথড না থাকলে মেইন স্টোরের bKash/Nagad নম্বর আর দেখানো হবে না
     } else {
         $stmtPM = $pdo->query("SELECT * FROM payment_methods 
             WHERE (subdomain_id = 0 OR subdomain_id IS NULL OR subdomain_id = '' OR subdomain_id = '0') AND is_active = 1 
@@ -2627,7 +2658,7 @@ try {
     }
 } catch (Throwable $e) {}
 
-if (empty($activePaymentMethods)) {
+if (!$tenant && empty($activePaymentMethods)) {
     $activePaymentMethods = [
         [
             'id'             => 1,
@@ -2678,7 +2709,7 @@ $dynamicCategoriesFound = [];
 
 try {
     $stmtCatList = $pdo->prepare("SELECT name FROM product_categories 
-        WHERE (subdomain_id = ? OR subdomain_id = 0) AND is_active = 1 
+        WHERE subdomain_id = ? AND is_active = 1 
         ORDER BY sort_order ASC, id ASC");
     $stmtCatList->execute([$currentSubdomainId]);
     foreach ($stmtCatList->fetchAll(PDO::FETCH_COLUMN) as $catName) {
@@ -3032,19 +3063,28 @@ if ($isFirebaseEnabled) {
     <meta name="theme-color" content="#04010a">
     <meta name="description" content="<?= htmlspecialchars($settings['site_tagline'] ?? 'Fastest Digital Licenses & Passes') ?>">
     
-    <link rel="manifest" href="manifest.json">
+    <link rel="manifest" href="index.php?pwa_manifest=1">
     <link rel="apple-touch-icon" href="<?= htmlspecialchars(!empty($storeLogoUrl) ? $storeLogoUrl : 'https://cdn-icons-png.flaticon.com/512/266/266033.png') ?>">
     
     <title><?= htmlspecialchars($storeTitleName) ?> — Client Portal</title>
     
     <!-- ⚡ SPEED: preconnect to every CDN so DNS/TLS happen in parallel -->
-    <link rel="preconnect" href="https://cdn.tailwindcss.com">
     <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
 
+    <?php
+    // ⚡ SPEED: আগে থেকে বানানো Tailwind CSS (ব্রাউজারে আর CSS কম্পাইল হয় না)।
+    // assets/vp-app.css না থাকলে বা লোড না হলে অটোমেটিক Tailwind CDN এ ফলব্যাক করবে।
+    $vpCssFile = __DIR__ . '/assets/vp-app.css';
+    $vpCssOk   = is_file($vpCssFile) && filesize($vpCssFile) > 1000;
+    ?>
+    <?php if ($vpCssOk): ?>
+    <link rel="stylesheet" href="assets/vp-app.css?v=<?= (int)filemtime($vpCssFile) ?>" onerror="var s=document.createElement('script');s.src='https://cdn.tailwindcss.com';document.head.appendChild(s);">
+    <?php else: ?>
     <script src="https://cdn.tailwindcss.com"></script>
+    <?php endif; ?>
 
     <!-- ⚡ SPEED: non-critical scripts no longer block page rendering -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
@@ -3539,24 +3579,65 @@ if ($isFirebaseEnabled) {
         .rk-result { margin-top: 14px; padding: 12px 14px; border-radius: 14px; font-size: 13px; line-height: 1.5; border: 1.5px solid; }
         .rk-result.ok { background: rgba(0, 255, 136, 0.08); border-color: #00ff88; color: #86efac; box-shadow: 0 0 12px rgba(0,255,136,.15); }
         .rk-result.err { background: rgba(244, 63, 94, 0.08); border-color: #f43f5e; color: #fda4af; }
-        /* ===== HEADER COLOR SYSTEM ===== */
-        .hdr-store-name { color: #ffffff; text-shadow: 0 0 4px rgba(255,255,255,.55), 0 0 10px rgba(0,245,255,.45), 0 0 18px rgba(217,70,239,.30); }
-        .hdr-portal-label { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.55); }
-        .hdr-chip { box-shadow: 0 1px 2px rgba(0,0,0,.4); white-space: nowrap; }
-        .hdr-currency-chip { background: #071026; border: 1.5px solid #3b82f6; color: #ffffff; }
-        .hdr-currency-chip:hover { border-color: #60a5fa; box-shadow: 0 0 8px rgba(59,130,246,.45); }
-        .hdr-coin-chip { background: #171003; border: 1.5px solid #fbbf24; color: #facc15; }
-        .hdr-coin-chip i, .hdr-coin-chip span { color: #facc15; text-shadow: 0 0 6px rgba(250,204,21,.45); }
-        .hdr-balance-chip { background: #03140b; border: 1.5px solid #00ff88; }
-        .hdr-balance-chip span, .hdr-balance-chip i { color: #00ff88; text-shadow: 0 0 6px rgba(0,255,136,.55); }
-        .hdr-balance-chip:hover { box-shadow: 0 0 10px rgba(0,255,136,.35); }
-        .hdr-bell-chip { background: #0f061e; border: 1.5px solid #a855f7; color: #22d3ee; }
-        .hdr-bell-chip i { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.6); }
-        .hdr-bell-chip:hover { box-shadow: 0 0 10px rgba(168,85,247,.45); }
-        @media (max-width: 380px) {
-            .hdr-chip { padding-left: 6px !important; padding-right: 6px !important; }
-            .hdr-currency-chip #currFlagIcon { display: none; }
-            .hdr-store-name { max-width: 84px !important; }
+        /* ===== HEADER — NEON PILL BAR (purple → cyan) ===== */
+        .vp-header-wrap { padding: 8px 8px 6px; background: linear-gradient(180deg, rgba(4,1,10,.97) 70%, rgba(4,1,10,0)); }
+        .vp-header-bar {
+            display: flex; align-items: center; justify-content: space-between; gap: 8px;
+            padding: 7px 8px 7px 7px; border-radius: 999px;
+            background: linear-gradient(#07031a, #07031a) padding-box,
+                        linear-gradient(90deg, #a855f7 0%, #7c3aed 35%, #22d3ee 100%) border-box;
+            border: 1.5px solid transparent;
+            box-shadow: 0 0 14px rgba(168, 85, 247, .35), 0 0 22px rgba(34, 211, 238, .15), inset 0 0 12px rgba(124, 58, 237, .12);
+        }
+        .vp-brand { display: flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; }
+        .vp-logo-ring { width: 42px; height: 42px; flex-shrink: 0; border-radius: 50%; padding: 2px; background: linear-gradient(135deg, #c084fc, #7c3aed); box-shadow: 0 0 10px rgba(168, 85, 247, .7); }
+        .vp-logo-ring img, .vp-logo-fallback { width: 100%; height: 100%; border-radius: 50%; object-fit: cover; display: flex; align-items: center; justify-content: center; background: #f5f3ff; color: #5b21b6; font-weight: 900; font-size: 16px; }
+        .vp-divider { width: 2px; align-self: stretch; margin: 4px 0; border-radius: 2px; background: linear-gradient(180deg, transparent, #a855f7, transparent); flex-shrink: 0; }
+        .vp-brand-text { min-width: 0; line-height: 1.1; }
+        .vp-store-name { font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 900; font-size: 14px; text-transform: uppercase; color: #fff; letter-spacing: .02em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 120px;
+            text-shadow: 0 0 6px rgba(255,255,255,.45), 0 0 14px rgba(168,85,247,.35); }
+        .vp-portal-label { display: block; margin-top: 2px; font-family: 'JetBrains Mono', monospace; font-weight: 800; font-size: 9px; letter-spacing: .12em; color: #22d3ee; text-shadow: 0 0 8px rgba(34,211,238,.55); white-space: nowrap; }
+        .vp-actions { display: flex; align-items: center; gap: 5px; flex-shrink: 0; }
+        .vp-pill { display: inline-flex; align-items: center; gap: 4px; height: 32px; padding: 0 9px; border-radius: 999px; border: 1.5px solid; font-family: 'Plus Jakarta Sans', sans-serif; font-weight: 800; font-size: 12px; white-space: nowrap; background: rgba(6, 3, 20, .85); cursor: pointer; transition: transform .1s, box-shadow .15s; }
+        .vp-pill:active, .vp-bell:active { transform: scale(.95); }
+        .vp-pill-currency { border-color: #3b82f6; color: #fff; box-shadow: 0 0 10px rgba(59,130,246,.45), inset 0 0 8px rgba(59,130,246,.12); }
+        .vp-pill-currency .vp-chev { color: #38bdf8; }
+        .vp-flag { font-size: 13px; line-height: 1; }
+        .vp-pill-coin { border-color: #fbbf24; color: #facc15; box-shadow: 0 0 10px rgba(251,191,36,.45), inset 0 0 8px rgba(251,191,36,.12); cursor: default; }
+        .vp-pill-coin i { color: #facc15; }
+        .vp-pill-balance { border-color: #22c55e; color: #4ade80; box-shadow: 0 0 10px rgba(34,197,94,.45), inset 0 0 8px rgba(34,197,94,.12); }
+        .vp-pill-balance span { color: #4ade80; text-shadow: 0 0 6px rgba(74,222,128,.5); }
+        .vp-plus { font-size: 14px; font-weight: 900; margin-left: 1px; }
+        .vp-pill-login { border-color: #d946ef; color: #fff; background: linear-gradient(90deg, #c026d3, #7c3aed); box-shadow: 0 0 12px rgba(217,70,239,.5); }
+        .vp-bell { position: relative; width: 36px; height: 36px; flex-shrink: 0; border-radius: 50%; display: flex; align-items: center; justify-content: center; background: rgba(6,3,20,.9); border: 1.5px solid #a855f7; color: #22d3ee; box-shadow: 0 0 10px rgba(168,85,247,.55); }
+        .vp-bell i { font-size: 14px; color: #22d3ee; text-shadow: 0 0 8px rgba(34,211,238,.8); }
+        .vp-bell-badge { position: absolute; top: -3px; right: -3px; min-width: 16px; height: 16px; padding: 0 3px; border-radius: 999px; background: #f43f5e; color: #fff; font-size: 8px; font-weight: 800; display: flex; align-items: center; justify-content: center; box-shadow: 0 0 8px #f43f5e; }
+        .vp-cur-menu { position: absolute; right: 0; margin-top: 8px; width: 120px; background: #0c051a; border: 1.5px solid rgba(59,130,246,.5); border-radius: 14px; box-shadow: 0 12px 30px rgba(0,0,0,.7); z-index: 50; overflow: hidden; padding: 4px 0; }
+        .vp-cur-menu button { width: 100%; text-align: left; padding: 8px 12px; font-size: 12px; font-weight: 700; color: #cbd5e1; display: flex; gap: 8px; align-items: center; }
+        .vp-cur-menu button:hover, .vp-cur-menu button.bg-cyan-500\/20 { background: rgba(59,130,246,.18); color: #fff; }
+        @media (min-width: 640px) {
+            .vp-header-wrap { padding: 10px 14px 8px; }
+            .vp-header-bar { padding: 8px 12px 8px 8px; gap: 12px; }
+            .vp-logo-ring { width: 50px; height: 50px; }
+            .vp-store-name { font-size: 18px; max-width: none; }
+            .vp-portal-label { font-size: 11px; }
+            .vp-actions { gap: 8px; }
+            .vp-pill { height: 38px; padding: 0 14px; font-size: 14px; }
+            .vp-bell { width: 42px; height: 42px; }
+        }
+        @media (max-width: 400px) {
+            .vp-divider { display: none; }
+            .vp-logo-ring { width: 36px; height: 36px; }
+            .vp-store-name { font-size: 12px; max-width: 92px; }
+            .vp-portal-label { font-size: 8px; letter-spacing: .08em; }
+            .vp-pill { height: 30px; padding: 0 7px; font-size: 11px; gap: 3px; }
+            .vp-bell { width: 32px; height: 32px; }
+            .vp-actions { gap: 4px; }
+        }
+        @media (max-width: 360px) {
+            .vp-flag { display: none; }
+            .vp-pill-coin { display: none; }
+            .vp-store-name { max-width: 80px; }
         }
     </style>
 </head>
@@ -3733,78 +3814,62 @@ if ($isFirebaseEnabled) {
         </div>
     </div>
 
-    <!-- 4. TOP STICKY HEADER -->
-    <header class="w-full flex items-center justify-between py-2.5 px-3 border-b border-[#180c2a] sticky top-0 z-30 bg-[#04010a]/95 backdrop-blur-md font-mono">
-        <div class="flex items-center space-x-2 cursor-pointer" onclick="goToPage('dashboard')">
-            <div class="w-9 h-9 rounded-2xl bg-gradient-to-tr from-fuchsia-600 to-purple-600 flex items-center justify-center text-white text-base font-bold shadow-md overflow-hidden flex-shrink-0 border border-fuchsia-500/40">
-                <?php if (!empty($storeLogoUrl)): ?>
-                    <img src="<?= htmlspecialchars($storeLogoUrl) ?>" alt="Logo" class="w-full h-full object-cover">
+    <!-- 4. TOP STICKY HEADER — নিয়ন পিল বার ডিজাইন -->
+    <header class="vp-header-wrap sticky top-0 z-30">
+        <div class="vp-header-bar">
+            <div class="vp-brand" onclick="goToPage('dashboard')">
+                <div class="vp-logo-ring">
+                    <?php if (!empty($storeLogoUrl)): ?>
+                        <img src="<?= htmlspecialchars($storeLogoUrl) ?>" alt="Logo" width="40" height="40" fetchpriority="high">
+                    <?php else: ?>
+                        <span class="vp-logo-fallback"><?= htmlspecialchars(mb_strtoupper(mb_substr($storeTitleName, 0, 1))) ?></span>
+                    <?php endif; ?>
+                </div>
+                <span class="vp-divider" aria-hidden="true"></span>
+                <div class="vp-brand-text">
+                    <h1 class="vp-store-name"><?= htmlspecialchars($storeTitleName) ?></h1>
+                    <span class="vp-portal-label"><?= $isLoggedIn ? strtoupper($userRole) . ' PORTAL' : 'OFFICIAL STORE' ?></span>
+                </div>
+            </div>
+
+            <div class="vp-actions">
+                <!-- 🇧🇩 💲 🇮🇳 CURRENCY -->
+                <div class="relative">
+                    <button type="button" onclick="toggleCurrencyDropdown(event)" id="currentCurrencyBtn" class="vp-pill vp-pill-currency" aria-label="Currency">
+                        <span id="currFlagIcon" class="vp-flag">🇧🇩</span>
+                        <span id="currCodeLabel">BDT</span>
+                        <svg class="vp-chev" viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="3"><polyline points="6 9 12 15 18 9"/></svg>
+                    </button>
+                    <div id="currencyDropdownMenu" class="hidden vp-cur-menu">
+                        <button type="button" onclick="selectCurrencyOption('BDT')" data-curr="BDT" class="currency-opt-btn"><span>🇧🇩</span> <span>BDT (৳)</span></button>
+                        <button type="button" onclick="selectCurrencyOption('USDT')" data-curr="USDT" class="currency-opt-btn"><span>💲</span> <span>USDT ($)</span></button>
+                        <button type="button" onclick="selectCurrencyOption('INR')" data-curr="INR" class="currency-opt-btn"><span>🇮🇳</span> <span>INR (₹)</span></button>
+                    </div>
+                </div>
+
+                <?php if ($isLoggedIn): ?>
+                    <div class="vp-pill vp-pill-coin" title="Your Reward Coins">
+                        <i class="fa-solid fa-coins"></i>
+                        <span id="liveHeaderCoins"><?= number_format($userCoins) ?></span>
+                    </div>
+
+                    <div onclick="<?= $canAddFund === 1 ? "goToPage('addfund')" : "showToast('Deposits are currently offline', 'error')" ?>" class="vp-pill vp-pill-balance" id="headerBalanceChip" title="Your BDT Balance" role="button">
+                        <span id="liveHeaderBalance" class="dynamic-price-el live-user-balance-el" data-bdt="<?= (float)$userBalanceBdt ?>" data-cur="short">৳<?= number_format($userBalanceBdt, 0) ?></span>
+                        <?php if ($canAddFund === 1): ?><span class="vp-plus">+</span><?php endif; ?>
+                    </div>
+
+                    <button type="button" onclick="openNotificationsModal()" class="vp-bell" aria-label="Notifications">
+                        <i class="fa-solid fa-bell"></i>
+                        <?php if ($notifCount > 0): ?>
+                            <span class="vp-bell-badge"><?= $notifCount > 9 ? '9+' : $notifCount ?></span>
+                        <?php endif; ?>
+                    </button>
                 <?php else: ?>
-                    <i class="fa-solid fa-gem text-sm"></i>
+                    <button type="button" onclick="openAuthModal('login')" class="vp-pill vp-pill-login">
+                        <i class="fa-solid fa-right-to-bracket"></i> <span>Log In</span>
+                    </button>
                 <?php endif; ?>
             </div>
-            <div>
-                <h1 class="hdr-store-name text-xs sm:text-sm font-black tracking-wider leading-none uppercase font-sans truncate max-w-[110px] sm:max-w-none">
-                    <?= htmlspecialchars($storeTitleName) ?>
-                </h1>
-                <span class="hdr-portal-label text-[8px] sm:text-[9px] font-bold uppercase tracking-widest block mt-0.5">
-                    <?= $isLoggedIn ? strtoupper($userRole) . ' PORTAL' : 'OFFICIAL STORE' ?>
-                </span>
-            </div>
-        </div>
-
-        <div class="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
-            <!-- 🇧🇩 💲 🇮🇳 CUSTOM DROPDOWN CURRENCY SELECTOR -->
-            <div class="relative font-mono">
-                <button type="button" onclick="toggleCurrencyDropdown(event)" id="currentCurrencyBtn" class="hdr-chip hdr-currency-chip flex items-center space-x-1 px-2 py-1.5 rounded-xl text-xs font-bold transition active:scale-95">
-                    <span id="currFlagIcon">🇧🇩</span>
-                    <span id="currCodeLabel">BDT</span>
-                    <i class="fa-solid fa-chevron-down text-[9px] ml-0.5" style="color:#60a5fa"></i>
-                </button>
-
-                <!-- Dropdown Menu -->
-                <div id="currencyDropdownMenu" class="hidden absolute right-0 mt-2 w-28 bg-[#0c051a] border border-cyan-500/40 rounded-xl shadow-2xl z-50 overflow-hidden py-1">
-                    <button type="button" onclick="selectCurrencyOption('BDT')" data-curr="BDT" class="currency-opt-btn w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
-                        <span>🇧🇩</span> <span>BDT (৳)</span>
-                    </button>
-                    <button type="button" onclick="selectCurrencyOption('USDT')" data-curr="USDT" class="currency-opt-btn w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
-                        <span>💲</span> <span>USDT ($)</span>
-                    </button>
-                    <button type="button" onclick="selectCurrencyOption('INR')" data-curr="INR" class="currency-opt-btn w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
-                        <span>🇮🇳</span> <span>INR (₹)</span>
-                    </button>
-                </div>
-            </div>
-
-            <?php if ($isLoggedIn): ?>
-                <div class="hdr-chip hdr-coin-chip flex items-center space-x-1 px-2 py-1.5 rounded-xl" title="Your Reward Coins">
-                    <i class="fa-solid fa-coins text-[11px]"></i>
-                    <span id="liveHeaderCoins" class="text-xs font-black font-mono leading-none">
-                        <?= number_format($userCoins) ?>
-                    </span>
-                </div>
-
-                <div onclick="<?= $canAddFund === 1 ? "goToPage('addfund')" : "showToast('Deposits are currently offline', 'error')" ?>" class="hdr-chip hdr-balance-chip cursor-pointer flex items-center space-x-1 px-2 py-1.5 rounded-xl transition" id="headerBalanceChip" title="Your BDT Balance">
-                    <span id="liveHeaderBalance" class="dynamic-price-el live-user-balance-el text-xs font-black font-mono leading-none" data-bdt="<?= (float)$userBalanceBdt ?>" data-cur="short">৳<?= number_format($userBalanceBdt, 0) ?></span>
-                    <?php if ($canAddFund === 1): ?>
-                        <i class="fa-solid fa-plus text-[8px] font-bold ml-0.5"></i>
-                    <?php endif; ?>
-                </div>
-
-                <button type="button" onclick="openNotificationsModal()" class="hdr-chip hdr-bell-chip relative w-8 h-8 rounded-xl flex items-center justify-center active:scale-95 transition flex-shrink-0" aria-label="Notifications">
-                    <i class="fa-solid fa-bell text-xs"></i>
-                    <?php if ($notifCount > 0): ?>
-                        <span class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white font-mono font-bold text-[8px] flex items-center justify-center shadow-[0_0_8px_#f43f5e] animate-pulse">
-                            <?= $notifCount > 9 ? '9+' : $notifCount ?>
-                        </span>
-                    <?php endif; ?>
-                </button>
-            <?php else: ?>
-                <button type="button" onclick="openAuthModal('login')" class="px-3.5 py-1.5 rounded-xl btn-magenta-glow text-white text-xs font-black uppercase tracking-wider flex items-center gap-1.5 shadow-md active:scale-95 transition">
-                    <i class="fa-solid fa-right-to-bracket text-xs"></i>
-                    <span>Log In</span>
-                </button>
-            <?php endif; ?>
         </div>
     </header>
 
@@ -4493,6 +4558,9 @@ if ($isFirebaseEnabled) {
                     <!-- Dynamic Methods Grid -->
                     <div class="space-y-1.5">
                         <label class="text-[10px] font-bold text-gray-300 uppercase block font-sans">Available Deposit Channels:</label>
+                        <?php if (empty($activePaymentMethods)): ?>
+                        <div class="p-3 rounded-xl border border-amber-500/40 bg-amber-950/20 text-amber-300 text-[11px] font-sans text-center">⚠️ এই স্টোরে এখনো কোনো পেমেন্ট মেথড সেট করা হয়নি। সাপোর্টে যোগাযোগ করুন।</div>
+                    <?php endif; ?>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs font-sans">
                             <?php 
                             $addFundMethodsCount = 0;
@@ -4727,7 +4795,7 @@ if ($isFirebaseEnabled) {
             </div>
             <div class="text-center space-y-0.5">
                 <h2 class="text-2xl sm:text-3xl babu88-gold-header uppercase tracking-wider">
-                    <?= !empty($tenant['site_title']) ? htmlspecialchars($tenant['site_title']) : 'BABU88' ?>
+                    <?= htmlspecialchars($storeTitleName) ?>
                 </h2>
                 <p class="text-[10px] text-yellow-200/80 font-sans tracking-wide">
                     Spin the lucky wheel for exclusive cashback discounts
@@ -5054,6 +5122,9 @@ if ($isFirebaseEnabled) {
                 <p class="text-[10px] text-gray-400 font-sans">Choose an admin-approved BDT gateway to open payment screen:</p>
 
                 <div id="adminMethodsDynamicList" class="space-y-2 max-h-60 overflow-y-auto no-scrollbar pr-0.5">
+                    <?php if (empty($activePaymentMethods)): ?>
+                        <div class="p-3 rounded-xl border border-amber-500/40 bg-amber-950/20 text-amber-300 text-[11px] font-sans text-center">⚠️ এই স্টোরে এখনো কোনো পেমেন্ট মেথড সেট করা হয়নি। সাপোর্টে যোগাযোগ করুন।</div>
+                    <?php endif; ?>
                     <?php foreach ($activePaymentMethods as $pm): 
                         if (isset($pm['allow_checkout']) && (int)$pm['allow_checkout'] === 0) continue;
                     ?>
