@@ -3348,19 +3348,37 @@ if ($isFirebaseEnabled) {
             z-index: 50; overflow: hidden;
         }
 
+        /* ===== 🔧 MAINTENANCE CARD — লাল নিয়ন রিবন + বাটন (ছবি/নাম/দাম দেখা যাবে) ===== */
         .product-card.product-card-maint {
-            background: linear-gradient(180deg, #2a0710 0%, #12030a 100%) !important;
-            border: 1.5px solid #f43f5e !important;
-            box-shadow: 0 0 14px rgba(244, 63, 94, 0.45), inset 0 0 18px rgba(244, 63, 94, 0.12) !important;
+            border: 1.5px solid rgba(244, 63, 94, 0.85) !important;
+            box-shadow: 0 0 14px rgba(244, 63, 94, 0.40), inset 0 0 18px rgba(244, 63, 94, 0.08) !important;
+            padding-top: 2.35rem !important; overflow: hidden;
         }
         .product-card.product-card-maint:hover { transform: none; }
-        .maint-icon-pulse { animation: maintPulse 1.4s ease-in-out infinite; }
-        @keyframes maintPulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
-        .maint-overlay {
-            position: absolute; inset: 0; background: rgba(40, 4, 14, 0.82); backdrop-filter: blur(3px);
-            z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 20px;
+        .product-card.product-card-maint img { filter: saturate(.75) brightness(.85); }
+        .maint-ribbon {
+            position: absolute; top: 0; left: 0; right: 0; z-index: 15; height: 1.75rem;
+            display: flex; align-items: center; justify-content: center; gap: 6px;
+            background: linear-gradient(90deg, #be123c 0%, #f43f5e 50%, #be123c 100%);
+            color: #fff; font-family: 'JetBrains Mono', monospace; font-weight: 900; font-size: 11px; letter-spacing: .16em;
+            text-shadow: 0 0 6px rgba(255,255,255,.55); box-shadow: 0 2px 14px rgba(244, 63, 94, 0.55);
+            border-radius: 18px 18px 0 0;
         }
-        .maint-watermark-text { color: #f43f5e; font-weight: 900; font-size: 13px; letter-spacing: 2px; }
+        .maint-ribbon i { font-size: 10px; animation: maintPulse 1.4s ease-in-out infinite; }
+        @keyframes maintPulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
+        .maint-btn { background: rgba(244, 63, 94, 0.12); border: 1.5px solid #f43f5e; color: #fda4af; box-shadow: 0 0 10px rgba(244, 63, 94, 0.35); transition: transform .15s; }
+        .maint-btn:active { transform: scale(.95); }
+        .maint-footer { flex-direction: column; align-items: stretch; gap: 8px; }
+        .maint-footer .price-badge-buy-style { align-self: center; }
+        .maint-footer .maint-btn { width: 100%; justify-content: center; padding-top: 8px; padding-bottom: 8px; }
+        .maint-icon-pulse { animation: maintPulse 1.4s ease-in-out infinite; }
+        /* Maintenance popup */
+        .maint-pop-card { background: linear-gradient(180deg, #1a0712 0%, #07020c 100%); border: 1.5px solid #f43f5e; border-radius: 24px;
+            box-shadow: 0 0 30px rgba(244, 63, 94, 0.35), 0 20px 50px rgba(0,0,0,.8); }
+        .maint-pop-icon { width: 64px; height: 64px; border-radius: 50%; margin: 0 auto; display: flex; align-items: center; justify-content: center;
+            background: rgba(244, 63, 94, 0.12); border: 2px solid #f43f5e; color: #fb7185; font-size: 26px; box-shadow: 0 0 18px rgba(244, 63, 94, 0.55); overflow: hidden; }
+        .maint-pop-icon img { width: 100%; height: 100%; object-fit: cover; }
+        .maint-pop-msg { background: rgba(244, 63, 94, 0.08); border: 1px dashed rgba(251, 113, 133, 0.6); border-radius: 14px; color: #fde68a; white-space: pre-line; word-break: break-word; }
 
         .pay-method-choice-card {
             background: linear-gradient(135deg, #0e051e 0%, #070212 100%);
@@ -3806,6 +3824,26 @@ if ($isFirebaseEnabled) {
         </div>
     </div>
 
+    <!-- 🔧 MAINTENANCE POPUP (প্রোডাক্টে ট্যাপ করলে অ্যাডমিনের লেখা নোটিশ) -->
+    <div id="maintPopup" class="fixed inset-0 z-[99990] hidden items-center justify-center p-5 bg-black/85 backdrop-blur-sm" onclick="if(event.target===this) closeMaintPopup()">
+        <div class="maint-pop-card w-full max-w-sm p-5 space-y-3.5 text-center relative">
+            <button type="button" onclick="closeMaintPopup()" class="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/10 text-gray-300 hover:text-white" aria-label="Close">✕</button>
+            <div id="maintPopIcon" class="maint-pop-icon"><i class="fa-solid fa-screwdriver-wrench"></i></div>
+            <div class="space-y-1">
+                <span class="inline-block px-3 py-0.5 rounded-full text-[9px] font-black tracking-[0.2em] bg-rose-600 text-white font-mono">🔧 MAINTENANCE</span>
+                <h3 id="maintPopName" class="text-base font-black text-white font-sans">Product</h3>
+            </div>
+            <p id="maintPopMsg" class="maint-pop-msg p-3 text-xs font-bold font-sans leading-relaxed text-left"></p>
+            <p class="text-[10px] text-gray-400 font-sans">এই প্রোডাক্টটি এখন সাময়িকভাবে বন্ধ আছে। চালু হলে আবার কিনতে পারবেন।</p>
+            <div class="flex gap-2">
+                <?php if (!empty($tenantTelegram)): ?>
+                    <a href="<?= htmlspecialchars($tenantTelegram) ?>" target="_blank" rel="noopener" class="flex-1 py-2.5 rounded-xl bg-[#0f061e] border border-cyan-500/50 text-cyan-300 text-xs font-black uppercase font-mono">Support</a>
+                <?php endif; ?>
+                <button type="button" onclick="closeMaintPopup()" class="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 text-white text-xs font-black uppercase font-mono shadow-lg">OK, Got it</button>
+            </div>
+        </div>
+    </div>
+
     <!-- 3. TOAST NOTIFICATION -->
     <div id="toastNotification" class="fixed top-3 left-1/2 transform -translate-x-1/2 z-[999999] transition-all duration-300 pointer-events-none opacity-0 translate-y-[-20px] w-[90%] max-w-sm">
         <div id="toastInner" class="bg-[#140826] border border-fuchsia-500/50 shadow-2xl rounded-2xl p-3 flex items-center space-x-2.5 text-xs font-semibold text-fuchsia-200 backdrop-blur-md font-mono">
@@ -3991,19 +4029,18 @@ if ($isFirebaseEnabled) {
                     ?>
                         <div class="product-card <?= $isProdMaint ? 'product-card-maint' : '' ?> p-3 sm:p-3.5 cursor-pointer prod-item-box space-y-2.5"
                              data-category="<?= $prod['category'] ?>"
-                             onclick="<?= $isProdMaint ? htmlspecialchars("showToast(" . json_encode('🔧 ' . (($prod['maintenance_msg'] ?? '') ?: 'This product is under maintenance')) . ", 'error')", ENT_QUOTES) : "openProductModal({$prod['id']})" ?>">
-                            
+                             <?php if ($isProdMaint): ?>
+                             data-maint-name="<?= htmlspecialchars($prod['name']) ?>"
+                             data-maint-msg="<?= htmlspecialchars($prod['maintenance_msg'] ?? '') ?>"
+                             data-maint-logo="<?= htmlspecialchars(!empty($prod['logo_url']) ? $prod['logo_url'] : ($bannerImg ?? '')) ?>"
+                             onclick="openMaintPopup(this)"
+                             <?php else: ?>
+                             onclick="openProductModal(<?= (int)$prod['id'] ?>)"
+                             <?php endif; ?>>
+
                             <?php if ($isProdMaint): ?>
-                                <div class="maint-overlay p-2 text-center">
-                                    <i class="fa-solid fa-screwdriver-wrench text-rose-400 text-lg mb-1 maint-icon-pulse"></i>
-                                    <div class="maint-watermark-text font-mono text-[11px] text-rose-400">MAINTENANCE</div>
-                                    <?php if (!empty($prod['maintenance_msg'])): ?>
-                                        <p class="text-[9px] text-amber-300 font-sans font-bold mt-1 px-1 line-clamp-2 leading-tight">
-                                            <?= htmlspecialchars($prod['maintenance_msg']) ?>
-                                        </p>
-                                    <?php endif; ?>
-                                    <span class="text-[8px] font-mono font-bold text-rose-300 mt-1 bg-black/80 px-2 py-0.5 rounded border border-rose-500/40">OFFLINE</span>
-                                </div>
+                                <!-- 🔧 MAINTENANCE RIBBON (সাইটের নিয়ন থিমে লাল) -->
+                                <div class="maint-ribbon"><i class="fa-solid fa-screwdriver-wrench"></i> MAINTENANCE</div>
                             <?php endif; ?>
 
                             <div class="space-y-2">
@@ -4061,7 +4098,7 @@ if ($isFirebaseEnabled) {
                                 </div>
                             </div>
 
-                            <div class="pt-2 border-t border-[#180b26] flex items-center justify-between gap-1.5">
+                            <div class="pt-2 border-t border-[#180b26] flex items-center justify-between gap-1.5 <?= $isProdMaint ? 'maint-footer' : '' ?>">
                                 <div class="price-badge-buy-style flex-col items-start !gap-0">
                                     <?php if ($hasDiscount && $minOriginalBDT > $minPriceBDT): ?>
                                         <span class="text-[8px] text-white/70 line-through font-mono leading-none dynamic-price-el" data-cur="short" data-bdt="<?= $minOriginalBDT ?>">
@@ -4077,8 +4114,8 @@ if ($isFirebaseEnabled) {
                                 </div>
 
                                 <?php if ($isProdMaint): ?>
-                                    <button type="button" disabled class="py-1.5 px-3 rounded-xl bg-gray-800 text-gray-400 text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1 cursor-not-allowed font-mono">
-                                        <i class="fa-solid fa-lock text-[8px]"></i> <span>OFFLINE</span>
+                                    <button type="button" class="maint-btn py-1.5 px-2.5 rounded-xl text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1 font-mono">
+                                        <i class="fa-solid fa-screwdriver-wrench text-[8px]"></i> <span>MAINTENANCE</span>
                                     </button>
                                 <?php else: ?>
                                     <button type="button" class="py-1.5 px-3 rounded-xl btn-buy-compact text-white text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1 shadow-md font-mono">
@@ -6149,7 +6186,7 @@ document.addEventListener('DOMContentLoaded', function() {
         function openProductModal(productId) {
             const prod = allProductsCatalog[productId];
             if (!prod) return;
-            if (parseInt(prod.is_active) === 0 || parseInt(prod.is_maintenance || 0) === 1) { showToast('🔧 ' + (prod.maintenance_msg || 'This product is under maintenance!'), 'error'); return; }
+            if (parseInt(prod.is_active) === 0 || parseInt(prod.is_maintenance || 0) === 1) { showMaintPopup(prod.name, prod.maintenance_msg || '', prod.logo_url || prod.banner_url || ''); return; }
             activeModalProduct = prod;
             if (typeof clearModalCoupon === 'function') clearModalCoupon(true);
             document.getElementById('modalProdName').innerText = prod.name;
@@ -6742,6 +6779,22 @@ document.addEventListener('DOMContentLoaded', function() {
         // ===================== 🔄 RESET: PRODUCT GRID (FF PANEL STYLE) =====================
         function escapeHtmlRs(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
         // ===================== KEY RESET =====================
+        // ===================== 🔧 MAINTENANCE POPUP =====================
+        function showMaintPopup(name, msg, logo) {
+            const pop = document.getElementById('maintPopup');
+            if (!pop) { showToast('🔧 ' + (msg || 'This product is under maintenance'), 'error'); return; }
+            document.getElementById('maintPopName').textContent = name || 'Product';
+            document.getElementById('maintPopMsg').textContent = (msg && msg.trim()) ? msg : 'This product is under maintenance. Please check back soon.';
+            const icon = document.getElementById('maintPopIcon');
+            icon.innerHTML = '';
+            if (logo) { const im = document.createElement('img'); im.src = logo; im.alt = ''; icon.appendChild(im); }
+            else icon.innerHTML = '<i class="fa-solid fa-screwdriver-wrench"></i>';
+            pop.classList.remove('hidden'); pop.classList.add('flex');
+        }
+        function openMaintPopup(el) { showMaintPopup(el.dataset.maintName, el.dataset.maintMsg, el.dataset.maintLogo); }
+        function closeMaintPopup() { const p = document.getElementById('maintPopup'); if (p) { p.classList.add('hidden'); p.classList.remove('flex'); } }
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMaintPopup(); });
+
         // ===================== 🔄 RESET (3 STEP) =====================
         function onResetKeyType(query) {
             const box = document.getElementById('resetSearchResultsBox');
