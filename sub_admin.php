@@ -1829,6 +1829,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $toast = ['type' => 'success', 'msg' => "Status changed to $newStatus!"];
     }
 
+
+    // 💰 RESELLER PRICE MANAGER — প্রতিটা প্রোডাক্টের প্রতিটা ভেরিয়েন্টের রিসেলার প্রাইস একসাথে সেভ
+    if ($act === 'bulk_save_reseller_prices') {
+        $rPrices = $_POST['rp_price'] ?? [];
+        $rDiscs  = $_POST['rp_disc'] ?? [];
+        $updStmt = $pdo->prepare("UPDATE product_plans SET reseller_price = ?, reseller_discount_percent = ? WHERE id = ? AND subdomain_id = ?");
+        $changed = 0;
+        if (is_array($rPrices)) {
+            foreach ($rPrices as $plId => $rawPrice) {
+                $plId = (int)$plId;
+                $rawPrice = trim((string)$rawPrice);
+                if ($plId <= 0 || $rawPrice === '' || !is_numeric($rawPrice)) continue;
+                $price = max(0.01, round((float)$rawPrice, 2));
+                $disc  = max(0.0, min(99.0, (float)($rDiscs[$plId] ?? 0)));
+                $updStmt->execute([$price, $disc, $plId, $subadminTenantId]);
+                $changed += $updStmt->rowCount();
+            }
+        }
+        // যেসব রিসেলারের নিজস্ব % ডিসকাউন্ট আছে তাদের ক্যাশ করা দাম নতুন রিসেলার প্রাইস থেকে আবার হিসাব
+        try {
+            $rsStmt = $pdo->prepare("SELECT id FROM users WHERE role = 'reseller' AND subdomain_id = ? AND discount_percent > 0");
+            $rsStmt->execute([$subadminTenantId]);
+            foreach ($rsStmt->fetchAll(PDO::FETCH_COLUMN) as $rsId) { syncTenantStackedPricesForUser($pdo, (int)$rsId, $subadminTenantId); }
+        } catch (Throwable $e) {}
+        $toast = ['type' => 'success', 'msg' => "Reseller prices saved ($changed variants updated)!"];
+    }
+
     if ($act === 'save_user_custom_pricing_and_access') {
         $userId = (int)$_POST['target_user_id'];
         $role = in_array($_POST['user_role'] ?? '', ['customer', 'reseller']) ? $_POST['user_role'] : 'customer';
@@ -3634,6 +3661,115 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
 
         <!-- 11. RESELLERS DIRECTORY TAB -->
         <section id="tab-resellers" class="tab-section hidden space-y-5">
+            <!-- 💰 RESELLER PRICE MANAGER: প্রতিটা প্রোডাক্ট × প্রতিটা ভেরিয়েন্ট -->
+            <div class="box-panel p-5 space-y-4 border-emerald-500/30">
+                <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800 font-mono">
+                    <div>
+                        <h3 class="text-xs font-bold text-emerald-400 uppercase tracking-wider flex items-center gap-2">
+                            <i class="fa-solid fa-tags"></i> RESELLER PRICE MANAGER
+                        </h3>
+                        <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">প্রতিটা প্রোডাক্টের প্রতিটা ভেরিয়েন্টের রিসেলার প্রাইস এখান থেকে এডিট করুন। সব রিসেলারের জন্য প্রযোজ্য (কারো কাস্টম প্রাইস থাকলে সেটাই আগে)।</span>
+                    </div>
+                    <span class="text-[10px] text-emerald-300 font-bold whitespace-nowrap">1 USD = ৳<?= htmlspecialchars((string)$effectiveBdtRate) ?></span>
+                </div>
+
+                <?php if (empty($productsData)): ?>
+                    <p class="text-center py-6 text-slate-500 text-xs font-sans">No products yet.</p>
+                <?php else: ?>
+                <div class="flex flex-wrap items-center gap-2 bg-slate-900/80 p-3 rounded-xl border border-slate-800 text-xs font-mono">
+                    <span class="text-slate-300 font-bold">⚡ Quick fill:</span>
+                    <span class="text-slate-400">Reseller =</span>
+                    <input type="number" id="rpQuickPercent" min="1" max="100" step="1" value="80" class="w-16 bg-[#030612] border border-slate-700 p-1.5 rounded-lg text-emerald-300 font-bold text-center outline-none">
+                    <span class="text-slate-400">% of customer price</span>
+                    <button type="button" onclick="rpQuickFill()" class="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-[11px] uppercase">Fill All</button>
+                    <div class="relative w-full sm:w-auto sm:ml-auto">
+                        <input type="text" id="rpSearch" oninput="rpFilter(this.value)" placeholder="Search product..." class="w-full sm:w-48 bg-[#030612] border border-slate-700 p-1.5 pl-7 rounded-lg text-white outline-none text-xs">
+                        <i class="fa-solid fa-magnifying-glass absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-500 text-[10px]"></i>
+                    </div>
+                </div>
+
+                <form method="POST" class="space-y-3" id="resellerPriceForm">
+                    <input type="hidden" name="admin_action" value="bulk_save_reseller_prices">
+                    <input type="hidden" name="active_tab" value="tab-resellers">
+                    <div class="space-y-3 max-h-[60vh] overflow-y-auto pr-1">
+                        <?php foreach ($productsData as $rpProd): if (empty($rpProd['plans'])) continue; ?>
+                            <div class="rp-prod-block rounded-2xl border border-slate-800 bg-[#050a1a] overflow-hidden" data-name="<?= htmlspecialchars(strtolower($rpProd['name'])) ?>">
+                                <div class="px-3 py-2 bg-slate-900/80 flex items-center justify-between gap-2">
+                                    <strong class="text-cyan-300 text-xs uppercase truncate"><?= htmlspecialchars($rpProd['name']) ?></strong>
+                                    <span class="text-[9px] text-slate-500 font-mono whitespace-nowrap"><?= count($rpProd['plans']) ?> variants</span>
+                                </div>
+                                <div class="divide-y divide-slate-800/70">
+                                    <?php foreach ($rpProd['plans'] as $rpPl):
+                                        $rpUser = (float)($rpPl['user_price'] ?? 0);
+                                        $rpRes  = (float)($rpPl['reseller_price'] ?? 0);
+                                        $rpDisc = (float)($rpPl['reseller_discount_percent'] ?? 0);
+                                        $rpId   = (int)$rpPl['id'];
+                                    ?>
+                                    <div class="rp-row p-2.5 grid grid-cols-2 sm:grid-cols-12 gap-2 items-center text-xs" data-user="<?= $rpUser ?>" data-plan="<?= $rpId ?>">
+                                        <div class="col-span-2 sm:col-span-3 min-w-0">
+                                            <span class="text-white font-bold block truncate"><?= htmlspecialchars($rpPl['plan_title'] ?: ($rpPl['validity'] ?? 'Plan')) ?></span>
+                                            <span class="text-[10px] text-slate-400 font-mono">Customer: $<?= number_format($rpUser, 2) ?> <span class="text-slate-500">(৳<?= number_format($rpUser * $effectiveBdtRate, 0) ?>)</span></span>
+                                        </div>
+                                        <label class="sm:col-span-3 flex items-center bg-slate-900 border border-emerald-500/30 rounded-lg px-2 py-1">
+                                            <span class="text-[10px] text-emerald-400 font-bold mr-1 whitespace-nowrap">Reseller $</span>
+                                            <input type="number" step="0.01" min="0.01" name="rp_price[<?= $rpId ?>]" value="<?= $rpRes > 0 ? number_format($rpRes, 2, '.', '') : '' ?>" placeholder="<?= number_format($rpUser, 2, '.', '') ?>" oninput="rpCalc(<?= $rpId ?>)" id="rp_price_<?= $rpId ?>" class="w-full min-w-0 bg-transparent text-emerald-300 font-black text-right outline-none">
+                                        </label>
+                                        <label class="sm:col-span-2 flex items-center bg-slate-900 border border-purple-500/30 rounded-lg px-2 py-1">
+                                            <span class="text-[10px] text-purple-400 font-bold mr-1">Disc%</span>
+                                            <input type="number" step="0.5" min="0" max="99" name="rp_disc[<?= $rpId ?>]" value="<?= $rpDisc > 0 ? rtrim(rtrim(number_format($rpDisc, 2, '.', ''), '0'), '.') : '0' ?>" oninput="rpCalc(<?= $rpId ?>)" id="rp_disc_<?= $rpId ?>" class="w-full min-w-0 bg-transparent text-purple-300 font-bold text-right outline-none">
+                                        </label>
+                                        <div class="col-span-2 sm:col-span-4 text-right font-mono">
+                                            <span class="text-[10px] text-slate-400">Reseller pays:</span>
+                                            <strong id="rp_final_<?= $rpId ?>" class="text-amber-300 text-xs">—</strong>
+                                            <span id="rp_margin_<?= $rpId ?>" class="block text-[9px] text-slate-500"></span>
+                                        </div>
+                                    </div>
+                                    <?php endforeach; ?>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <button type="submit" class="w-full py-3.5 btn-emerald rounded-xl uppercase text-xs font-black tracking-wider shadow-md">💾 Save All Reseller Prices</button>
+                </form>
+                <script>
+                    const RP_BDT_RATE = <?= (float)$effectiveBdtRate ?>;
+                    function rpCalc(id) {
+                        const row = document.querySelector('.rp-row[data-plan="' + id + '"]');
+                        if (!row) return;
+                        const userP = parseFloat(row.dataset.user) || 0;
+                        const pIn = document.getElementById('rp_price_' + id);
+                        const dIn = document.getElementById('rp_disc_' + id);
+                        const base = parseFloat(pIn.value) > 0 ? parseFloat(pIn.value) : userP;
+                        const disc = Math.min(99, Math.max(0, parseFloat(dIn.value) || 0));
+                        const fin = Math.max(0.01, base * (1 - disc / 100));
+                        document.getElementById('rp_final_' + id).textContent = '$' + fin.toFixed(2) + ' (৳' + Math.round(fin * RP_BDT_RATE).toLocaleString() + ')';
+                        const m = document.getElementById('rp_margin_' + id);
+                        if (userP > 0) {
+                            const off = Math.round((1 - fin / userP) * 100);
+                            m.textContent = off > 0 ? off + '% cheaper than customer' : (off < 0 ? '⚠ costlier than customer price!' : 'same as customer');
+                            m.className = 'block text-[9px] ' + (off < 0 ? 'text-rose-400' : 'text-slate-500');
+                        }
+                    }
+                    function rpQuickFill() {
+                        const pct = Math.min(100, Math.max(1, parseFloat(document.getElementById('rpQuickPercent').value) || 80));
+                        if (!confirm('সব ভেরিয়েন্টের Reseller $ = Customer price এর ' + pct + '% বসানো হবে (Disc% = 0)। Save চাপলে সেভ হবে। Continue?')) return;
+                        document.querySelectorAll('.rp-row').forEach(row => {
+                            if (row.closest('.rp-prod-block').style.display === 'none') return;
+                            const id = row.dataset.plan, userP = parseFloat(row.dataset.user) || 0;
+                            if (userP <= 0) return;
+                            document.getElementById('rp_price_' + id).value = (userP * pct / 100).toFixed(2);
+                            document.getElementById('rp_disc_' + id).value = 0;
+                            rpCalc(id);
+                        });
+                    }
+                    function rpFilter(q) {
+                        q = (q || '').toLowerCase().trim();
+                        document.querySelectorAll('.rp-prod-block').forEach(b => { b.style.display = (!q || b.dataset.name.includes(q)) ? '' : 'none'; });
+                    }
+                    document.querySelectorAll('.rp-row').forEach(r => rpCalc(r.dataset.plan));
+                </script>
+                <?php endif; ?>
+            </div>
             <div class="box-panel p-5 space-y-4">
                 <div class="flex flex-col sm:flex-row sm:items-center justify-between pb-3 border-b border-slate-800 gap-3 font-mono">
                     <div>
