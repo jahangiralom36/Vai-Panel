@@ -2204,6 +2204,9 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             .stat-card.h-32 { height: auto; min-height: 6.5rem; }
             .whitespace-nowrap.btn-purple, .whitespace-nowrap.btn-cyan { white-space: normal; }
             #adminDrawer { width: min(310px, 86vw); }
+            .overview-stat-grid .stat-card { padding: 0.8rem 0.85rem; min-width: 0; }
+            .overview-stat-grid .stat-card h2 { font-size: 1.2rem; line-height: 1.6rem; overflow-wrap: anywhere; }
+            .overview-stat-grid .stat-card span { font-size: 9px; }
             header .text-sm.uppercase { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
         }
     </style>
@@ -2332,7 +2335,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
 
         <!-- 1. DASHBOARD OVERVIEW -->
         <section id="tab-overview" class="tab-section space-y-5">
-            <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 font-mono">
+            <div class="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 font-mono overview-stat-grid">
                 <div class="stat-card flex flex-col justify-between h-32">
                     <span class="text-[10px] text-slate-400 font-bold uppercase tracking-wider">TODAY REVENUE</span>
                     <h2 class="text-3xl font-black text-emerald-400 mt-1">$<?= number_format($todaySales, 2) ?></h2>
