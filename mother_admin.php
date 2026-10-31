@@ -598,6 +598,50 @@ function km_get_cached_provider_balance(PDO $pdo): string {
 // ====================================================================
 // ROBUST STACKING DISCOUNT CALCULATOR & SYNCHRONIZER
 // ====================================================================
+
+// ====================================================================
+// 🔄 RESET API PRODUCTS — রিসেট পেজের ড্রপডাউনে যে প্রোডাক্টগুলো আসবে (Mother Panel থেকে এডিট)
+// ====================================================================
+if (!function_exists('vpDefaultResetProducts')) {
+    function vpDefaultResetProducts(): array {
+        return [
+            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
+        ];
+    }
+}
+if (!function_exists('vpGetResetProducts')) {
+    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false): array {
+        $list = null;
+        try {
+            $st = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'reset_api_products' LIMIT 1");
+            $st->execute();
+            $raw = $st->fetchColumn();
+            if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
+        } catch (Throwable $e) {}
+        if ($list === null) $list = vpDefaultResetProducts();
+        $out = [];
+        foreach ($list as $r) {
+            $name = trim((string)($r['name'] ?? ''));
+            if ($name === '') continue;
+            $row = [
+                'slug'    => (string)($r['slug'] ?? substr(md5($name), 0, 10)),
+                'name'    => $name,
+                'api_id'  => max(0, (int)($r['api_id'] ?? 0)),
+                'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
+            ];
+            if ($onlyEnabled && !$row['enabled']) continue;
+            $out[] = $row;
+        }
+        return $out;
+    }
+}
+
 function syncStackedPricesForUser(PDO $pdo, int $userId) {
     try {
         $stmtUser = $pdo->prepare("SELECT id, role, discount_percent FROM users WHERE id = ? AND subdomain_id = 0 LIMIT 1");
@@ -1127,6 +1171,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     }
 
 
+
+
+    // 🔄 RESET API PRODUCTS (স্টোরের Reset পেজের Step 1 ড্রপডাউন)
+    if ($act === 'save_reset_api_products') {
+        $names = $_POST['rp_name'] ?? []; $apis = $_POST['rp_api'] ?? []; $slugs = $_POST['rp_slug'] ?? []; $ens = $_POST['rp_enabled'] ?? [];
+        $newList = []; $seen = [];
+        if (is_array($names)) {
+            foreach ($names as $i => $nm) {
+                $nm = trim((string)$nm);
+                if ($nm === '') continue;
+                $slug = preg_replace('/[^a-z0-9-]/', '', strtolower((string)($slugs[$i] ?? '')));
+                if ($slug === '' || isset($seen[$slug])) $slug = substr(md5($nm . microtime(true) . $i), 0, 10);
+                $seen[$slug] = 1;
+                $newList[] = ['slug' => $slug, 'name' => mb_substr($nm, 0, 100), 'api_id' => max(0, (int)($apis[$i] ?? 0)), 'enabled' => isset($ens[$i]) ? 1 : 0];
+            }
+        }
+        $json = json_encode($newList, JSON_UNESCAPED_UNICODE);
+        $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES ('reset_api_products', ?) ON DUPLICATE KEY UPDATE setting_value = ?")->execute([$json, $json]);
+        $toast = ['type' => 'success', 'msg' => 'Reset products saved (' . count($newList) . ' items)!'];
+    }
 
     // 🔄 PRODUCT RESET PERMISSION TOGGLE
     if ($act === 'toggle_product_reset') {
@@ -3500,6 +3564,48 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
 
         <!-- 4. CONNECT KEY MANAGER TERMINAL -->
         <section id="tab-connectkm" class="tab-section hidden space-y-5 font-mono">
+            <!-- 🔄 RESET API PRODUCTS EDITOR -->
+            <?php $rpEditList = vpGetResetProducts($pdo, false); ?>
+            <div class="box-panel p-5 space-y-4 border-emerald-500/30">
+                <div class="pb-3 border-b border-slate-800">
+                    <h3 class="text-xs font-black text-emerald-400 uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-arrows-rotate"></i> RESET PAGE PRODUCTS (HWID RESET API)</h3>
+                    <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">স্টোরের Reset পেজে "Step 1 — Select Product" এ এই প্রোডাক্টগুলো আসবে (মেইন + সব সাব-স্টোর)। প্রতিটার KeyManager API ID দিন। API ID 0 হলে Connect Key Manager এর ডিফল্ট API দিয়ে রিসেট হবে।</span>
+                </div>
+                <form method="POST" class="space-y-2.5 text-xs">
+                    <input type="hidden" name="admin_action" value="save_reset_api_products">
+                    <input type="hidden" name="active_tab" value="tab-connectkm">
+                    <div id="rpEditRows" class="space-y-2">
+                        <?php foreach ($rpEditList as $i => $rp): ?>
+                            <div class="rp-edit-row grid grid-cols-12 gap-2 items-center bg-slate-900/80 p-2 rounded-xl border border-slate-800">
+                                <input type="hidden" name="rp_slug[<?= $i ?>]" value="<?= htmlspecialchars($rp['slug']) ?>">
+                                <input type="text" name="rp_name[<?= $i ?>]" value="<?= htmlspecialchars($rp['name']) ?>" placeholder="Product name" class="col-span-6 sm:col-span-6 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
+                                <input type="number" min="0" name="rp_api[<?= $i ?>]" value="<?= (int)$rp['api_id'] ?>" placeholder="API ID" title="API ID" class="col-span-3 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
+                                <label class="col-span-2 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold cursor-pointer"><input type="checkbox" name="rp_enabled[<?= $i ?>]" value="1" <?= $rp['enabled'] ? 'checked' : '' ?> class="rounded"> ON</label>
+                                <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 hover:text-red-300 text-sm" title="Remove">✕</button>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" onclick="rpAddRow()" class="px-3 py-2 rounded-xl bg-slate-800 text-cyan-300 font-bold text-[11px] uppercase">+ Add Product</button>
+                        <button type="submit" class="flex-1 py-2.5 btn-emerald rounded-xl uppercase text-xs font-black">💾 Save Reset Products</button>
+                    </div>
+                </form>
+                <script>
+                    let rpRowIdx = <?= count($rpEditList) + 100 ?>;
+                    function rpAddRow() {
+                        const i = rpRowIdx++;
+                        const div = document.createElement('div');
+                        div.className = 'rp-edit-row grid grid-cols-12 gap-2 items-center bg-slate-900/80 p-2 rounded-xl border border-emerald-500/40';
+                        div.innerHTML = `<input type="hidden" name="rp_slug[${i}]" value="">
+                            <input type="text" name="rp_name[${i}]" placeholder="Product name" class="col-span-6 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
+                            <input type="number" min="0" name="rp_api[${i}]" value="0" class="col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
+                            <label class="col-span-2 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold"><input type="checkbox" name="rp_enabled[${i}]" value="1" checked class="rounded"> ON</label>
+                            <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 text-sm">✕</button>`;
+                        document.getElementById('rpEditRows').appendChild(div);
+                        div.querySelector('input[type=text]').focus();
+                    }
+                </script>
+            </div>
             <div class="box-panel p-5 space-y-5 border-cyan-500/20">
                 <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                     <h3 class="text-xs font-black text-cyan-300 uppercase tracking-wider flex items-center gap-2">

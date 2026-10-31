@@ -678,6 +678,50 @@ if (!function_exists('vpRecordCouponUse')) {
     }
 }
 
+
+// ====================================================================
+// 🔄 RESET API PRODUCTS — রিসেট পেজের ড্রপডাউনে যে প্রোডাক্টগুলো আসবে (Mother Panel থেকে এডিট)
+// ====================================================================
+if (!function_exists('vpDefaultResetProducts')) {
+    function vpDefaultResetProducts(): array {
+        return [
+            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
+        ];
+    }
+}
+if (!function_exists('vpGetResetProducts')) {
+    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false): array {
+        $list = null;
+        try {
+            $st = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'reset_api_products' LIMIT 1");
+            $st->execute();
+            $raw = $st->fetchColumn();
+            if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
+        } catch (Throwable $e) {}
+        if ($list === null) $list = vpDefaultResetProducts();
+        $out = [];
+        foreach ($list as $r) {
+            $name = trim((string)($r['name'] ?? ''));
+            if ($name === '') continue;
+            $row = [
+                'slug'    => (string)($r['slug'] ?? substr(md5($name), 0, 10)),
+                'name'    => $name,
+                'api_id'  => max(0, (int)($r['api_id'] ?? 0)),
+                'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
+            ];
+            if ($onlyEnabled && !$row['enabled']) continue;
+            $out[] = $row;
+        }
+        return $out;
+    }
+}
+
 // ====================================================================
 // 4B. TELEGRAM BOT NOTIFICATION ENGINE (MAIN + TENANT)
 // ====================================================================
@@ -2096,31 +2140,47 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
         exit;
     }
 
-    // ── Key ownership check ──
-    // (আগে p.km_api_id কলাম না থাকায় এই কুয়েরি ক্র্যাশ করত — রিসেট একদম কাজ করত না)
-    $keyRow = false;
+    // ── Step 1: সিলেক্ট করা রিসেট প্রোডাক্ট (Mother Panel এর লিস্ট থেকে) ──
+    $resetSlug = trim((string)($_POST['reset_product'] ?? ''));
+    $chosenReset = null;
+    foreach (vpGetResetProducts($pdo, true) as $__rp) {
+        if ($__rp['slug'] === $resetSlug) { $chosenReset = $__rp; break; }
+    }
+    if (!$chosenReset) {
+        echo json_encode(['status' => 'error', 'message' => 'Please select a product first! (Step 1)']);
+        exit;
+    }
+
+    // ── Anti-spam: প্রতি ইউজার ঘণ্টায় সর্বোচ্চ ১০টা রিসেট রিকোয়েস্ট ──
     try {
-        $stmtKey = $pdo->prepare("SELECT l.*, COALESCE(p.km_api_id, 0) as api_id, COALESCE(p.reset_enabled, 1) as reset_enabled, p.name as product_name
-                               FROM licenses l
-                               LEFT JOIN products p ON p.id = l.product_id
-                               WHERE l.user_id = ? AND l.license_key = ? AND l.subdomain_id = ? LIMIT 1");
-        $stmtKey->execute([$user['id'], $rawKey, $currentSubdomainId]);
-        $keyRow = $stmtKey->fetch(PDO::FETCH_ASSOC);
-    } catch (Throwable $e) {
-        $stmtKey = $pdo->prepare("SELECT l.*, 0 as api_id, 1 as reset_enabled FROM licenses l WHERE l.user_id = ? AND l.license_key = ? AND l.subdomain_id = ? LIMIT 1");
-        $stmtKey->execute([$user['id'], $rawKey, $currentSubdomainId]);
-        $keyRow = $stmtKey->fetch(PDO::FETCH_ASSOC);
-    }
+        $pdo->exec("CREATE TABLE IF NOT EXISTS `reset_logs` (
+            `id` INT AUTO_INCREMENT PRIMARY KEY,
+            `subdomain_id` INT NOT NULL DEFAULT 0,
+            `user_id` INT NOT NULL,
+            `product_name` VARCHAR(150) NULL,
+            `license_key` VARCHAR(255) NULL,
+            `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            INDEX `idx_rl_user_time` (`user_id`, `created_at`)
+        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+        $stRl = $pdo->prepare("SELECT COUNT(*) FROM reset_logs WHERE user_id = ? AND created_at > DATE_SUB(NOW(), INTERVAL 1 HOUR)");
+        $stRl->execute([$user['id']]);
+        if ((int)$stRl->fetchColumn() >= 10) {
+            echo json_encode(['status' => 'error', 'message' => 'Too many reset requests! Please try again after 1 hour.']);
+            exit;
+        }
+        $pdo->prepare("INSERT INTO reset_logs (subdomain_id, user_id, product_name, license_key) VALUES (?, ?, ?, ?)")
+            ->execute([$currentSubdomainId, $user['id'], $chosenReset['name'], $rawKey]);
+    } catch (Throwable $e) {}
 
-    if (!$keyRow) {
-        echo json_encode(['status' => 'error', 'message' => 'License key not found in your account on this store!']);
-        exit;
-    }
-
-    if ((int)($keyRow['reset_enabled'] ?? 1) !== 1) {
-        echo json_encode(['status' => 'error', 'message' => '❌ ' . (($keyRow['product_name'] ?? '') ?: 'This product') . ' does not support HWID reset.']);
-        exit;
-    }
+    // ── কি যদি এই স্টোরের অর্ডারে থাকে তাহলে সেটার রেকর্ড আপডেট হবে (না থাকলেও রিসেট হবে) ──
+    $keyRow = ['id' => 0];
+    try {
+        $stmtKey = $pdo->prepare("SELECT id FROM licenses WHERE user_id = ? AND license_key = ? AND subdomain_id = ? LIMIT 1");
+        $stmtKey->execute([$user['id'], $rawKey, $currentSubdomainId]);
+        $found = $stmtKey->fetch(PDO::FETCH_ASSOC);
+        if ($found) $keyRow = $found;
+    } catch (Throwable $e) {}
+    $keyRow['api_id'] = (int)$chosenReset['api_id'];
 
     // ── API Config ──
     $KM_API_KEY   = 'keymanager_live_0f18492c550d2e3a350c821604de9e7a';
@@ -3446,6 +3506,28 @@ if ($isFirebaseEnabled) {
 
         :root { color-scheme: dark; }
         select, option { background-color: #070210; color: #e5e7eb; }
+
+        /* ===== RESET PAGE (screenshot style: white card, green accent) ===== */
+        .rk-card { background: #ffffff; border: 1.5px solid #e5e7eb; border-radius: 22px; padding: 22px 18px; box-shadow: 0 6px 24px rgba(0,0,0,.25); color: #111827; color-scheme: light; }
+        .rk-title { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px; font-weight: 800; letter-spacing: .06em; color: #111827; display: flex; align-items: center; justify-content: center; gap: 8px; }
+        .rk-sub { font-size: 12px; color: #6b7280; }
+        .rk-label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: #374151; }
+        .rk-input { width: 100%; background: #f8fafc; border: 1.5px solid #e5e7eb; border-radius: 14px; padding: 13px 14px; font-size: 14px; color: #111827; outline: none; transition: border-color .15s, box-shadow .15s; }
+        .rk-input:focus { border-color: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.15); background: #ffffff; }
+        .rk-select { -webkit-appearance: none; appearance: none; border-color: #10b981; padding-right: 40px;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23111827' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 14px center; }
+        .rk-select option { background: #ffffff; color: #111827; }
+        .rk-key { font-family: 'JetBrains Mono', ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; }
+        .rk-key::placeholder { color: #9ca3af; }
+        .rk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; background: #059669; color: #ffffff; font-weight: 800; font-size: 15px; letter-spacing: .04em; border-radius: 14px; padding: 15px 18px; box-shadow: 0 6px 16px rgba(5,150,105,.35); transition: transform .1s, background .15s; }
+        .rk-btn:hover { background: #047857; } .rk-btn:active { transform: scale(.98); } .rk-btn:disabled { opacity: .6; }
+        .rk-suggest { position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; background: #ffffff; border: 1.5px solid #d1fae5; border-radius: 14px; max-height: 200px; overflow-y: auto; z-index: 30; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 4px; }
+        .rk-suggest-row { padding: 8px 10px; border-radius: 10px; cursor: pointer; display: flex; flex-direction: column; }
+        .rk-suggest-row:hover { background: #ecfdf5; }
+        .rk-result { margin-top: 14px; padding: 12px 14px; border-radius: 14px; font-size: 13px; line-height: 1.5; border: 1.5px solid; }
+        .rk-result.ok { background: #ecfdf5; border-color: #10b981; color: #065f46; }
+        .rk-result.err { background: #fef2f2; border-color: #f87171; color: #991b1b; }
         /* ===== HEADER COLOR SYSTEM ===== */
         .hdr-store-name { color: #ffffff; text-shadow: 0 0 4px rgba(255,255,255,.55), 0 0 10px rgba(0,245,255,.45), 0 0 18px rgba(217,70,239,.30); }
         .hdr-portal-label { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.55); }
@@ -4137,103 +4219,48 @@ if ($isFirebaseEnabled) {
             </div>
         </section>
 
-        <!-- 6C. RESET HWID TAB -->
-        <section id="page-resetkey" class="page-section hidden w-full space-y-3 font-mono">
-            <div class="glass-card rounded-2xl p-4 sm:p-5 space-y-3.5 border border-cyan-500/40 shadow-xl">
-                <div class="text-center pb-1">
-                    <h2 class="text-xs sm:text-sm font-black tracking-wider text-white uppercase flex items-center justify-center gap-2 font-cyber">
-                        <i class="fa-solid fa-arrows-rotate text-cyan-400"></i> RESET LICENSE HARDWARE ID
-                    </h2>
-                    <p class="text-[10px] text-purple-300/70 mt-0.5 font-sans">Unlink active license key from previous device</p>
+        <!-- 6C. RESET HWID TAB — সহজ ৩ স্টেপ: প্রোডাক্ট → কি → রিসেট -->
+        <?php $resetApiProducts = vpGetResetProducts($pdo, true); ?>
+        <section id="page-resetkey" class="page-section hidden w-full font-sans">
+            <div class="rk-card">
+                <div class="text-center space-y-1 pb-1">
+                    <h2 class="rk-title"><i class="fa-solid fa-arrows-rotate" style="color:#059669"></i> RESET LICENSE HARDWARE ID</h2>
+                    <p class="rk-sub">Select product &rarr; enter your key &rarr; reset HWID</p>
                 </div>
-
-                <?php
-                // 🔄 FF-PANEL STYLE: কোন কোন প্রোডাক্ট রিসেট দেওয়া যাবে — সামনে দেখাবে
-                $resetKeyCountByProd = [];
-                foreach ($userAllResetKeys as $__rk) {
-                    $__pid = (int)($__rk['product_id'] ?? 0);
-                    $resetKeyCountByProd[$__pid] = ($resetKeyCountByProd[$__pid] ?? 0) + 1;
-                }
-                $resettableProducts = [];
-                $nonResettableNames = [];
-                foreach ($catalogProducts as $__cp) {
-                    if ((int)($__cp['reset_enabled'] ?? 1) === 1) $resettableProducts[] = $__cp;
-                    else $nonResettableNames[] = $__cp['name'];
-                }
-                ?>
-                <?php if (!empty($resettableProducts)): ?>
-                <div class="space-y-2">
-                    <div class="flex items-center justify-between">
-                        <span class="text-[10px] font-black text-cyan-300 uppercase tracking-wider flex items-center gap-1.5"><span class="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse"></span> Reset Available For</span>
-                        <span class="text-[9px] text-gray-500 font-sans">Tap a product</span>
-                    </div>
-                    <div class="grid grid-cols-3 gap-2" id="resetProdGrid">
-                        <?php foreach ($resettableProducts as $rp):
-                            $rpCount = (int)($resetKeyCountByProd[(int)$rp['id']] ?? 0);
-                            $rpLogo  = !empty($rp['logo_url']) ? $rp['logo_url'] : ($rp['banner_url'] ?? '');
-                        ?>
-                            <button type="button" onclick="selectResetProduct(<?= (int)$rp['id'] ?>)" data-reset-prod="<?= (int)$rp['id'] ?>" data-name="<?= htmlspecialchars($rp['name']) ?>" class="reset-prod-card relative flex flex-col items-center gap-1.5 p-2 rounded-2xl bg-[#0b0418] border border-cyan-500/25 hover:border-cyan-400 active:scale-95 transition text-center">
-                                <div class="w-11 h-11 rounded-xl overflow-hidden bg-gradient-to-tr from-cyan-600 to-fuchsia-600 flex items-center justify-center text-white font-black text-sm border border-cyan-400/40">
-                                    <?php if (!empty($rpLogo)): ?>
-                                        <img loading="lazy" decoding="async" src="<?= htmlspecialchars($rpLogo) ?>" alt="" class="w-full h-full object-cover">
-                                    <?php else: ?>
-                                        <?= htmlspecialchars(strtoupper(mb_substr($rp['name'], 0, 1))) ?>
-                                    <?php endif; ?>
-                                </div>
-                                <span class="text-[9px] font-bold text-white leading-tight line-clamp-2 font-sans w-full"><?= htmlspecialchars($rp['name']) ?></span>
-                                <span class="text-[8px] font-mono font-bold px-1.5 py-0.5 rounded-full <?= $rpCount > 0 ? 'bg-emerald-500/15 text-emerald-300 border border-emerald-500/30' : 'bg-cyan-500/10 text-cyan-400 border border-cyan-500/20' ?>">
-                                    <?= $isLoggedIn ? ($rpCount > 0 ? $rpCount . ' KEY' . ($rpCount > 1 ? 'S' : '') : 'RESET ✓') : 'RESET ✓' ?>
-                                </span>
-                            </button>
-                        <?php endforeach; ?>
-                    </div>
-                    <?php if (!empty($nonResettableNames)): ?>
-                        <p class="text-[9px] text-gray-500 font-sans leading-snug">⛔ Reset not available: <?= htmlspecialchars(implode(', ', $nonResettableNames)) ?></p>
-                    <?php endif; ?>
-                    <div id="resetProdKeysBox" class="hidden rounded-2xl border border-cyan-500/30 bg-[#070210] p-2.5 space-y-1.5"></div>
-                </div>
-                <?php endif; ?>
 
                 <?php if (!$isLoggedIn): ?>
-                    <div class="text-center py-10 space-y-2.5 text-xs">
-                        <i class="fa-solid fa-lock text-3xl mb-1 text-cyan-400 block"></i>
-                        <p class="text-gray-300 font-bold font-sans">Please login to manage and reset your keys</p>
-                        <button onclick="openAuthModal('login')" class="px-5 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-gray-950 text-xs font-black font-mono active:scale-95 transition">
-                            Login Now
-                        </button>
+                    <div class="text-center py-6 space-y-3">
+                        <i class="fa-solid fa-lock text-3xl block" style="color:#059669"></i>
+                        <p class="rk-label" style="justify-content:center">Please login to reset your key</p>
+                        <button type="button" onclick="openAuthModal('login')" class="rk-btn">Login Now</button>
                     </div>
                 <?php else: ?>
-                    <form id="liveResetForm" onsubmit="handleLiveKeyReset(event)" class="space-y-3.5 text-xs">
-                        <!-- ১. ড্রপডাউন সিলেক্ট -->
-                        <div class="space-y-1">
-                            <label class="text-[10px] font-bold text-cyan-300 flex items-center gap-1 font-sans">
-                                <i class="fa-solid fa-list-check"></i> 1. Select Key from Your Orders:
-                            </label>
-                            <select id="resetKeyDropdown" onchange="onResetDropdownSelect(this.value)" class="w-full bg-[#070210] border border-[#180c2a] text-xs text-white rounded-xl p-2.5 outline-none focus:border-cyan-400 font-mono">
-                                <option value="">-- Choose Purchased Key --</option>
-                                <?php foreach ($userAllResetKeys as $rk): ?>
-                                    <option value="<?= htmlspecialchars($rk['license_key']) ?>">
-                                        <?= htmlspecialchars($rk['validity'] ?? 'Key') ?> — <?= htmlspecialchars($rk['license_key']) ?>
-                                    </option>
+                    <form id="liveResetForm" onsubmit="handleLiveKeyReset(event)" class="space-y-4" autocomplete="off">
+                        <div class="space-y-2">
+                            <label class="rk-label" for="resetProductSelect">Step 1 — Select Product</label>
+                            <select id="resetProductSelect" class="rk-input rk-select" required>
+                                <option value="">-- Choose Product --</option>
+                                <?php foreach ($resetApiProducts as $rap): ?>
+                                    <option value="<?= htmlspecialchars($rap['slug']) ?>"><?= htmlspecialchars($rap['name']) ?></option>
                                 <?php endforeach; ?>
                             </select>
                         </div>
 
-                        <!-- ২. ম্যানুয়াল টাইপ বা পেস্ট -->
-                        <div class="relative space-y-1">
-                            <label class="text-[10px] font-bold text-gray-300 flex items-center gap-1 font-sans">
-                                <i class="fa-solid fa-keyboard"></i> 2. Or Type / Paste Key Manually:
-                            </label>
-                            <input type="text" id="resetKeySearchInput" autocomplete="off" placeholder="Paste license key here..." oninput="onResetSearchInput(this.value)" class="w-full bg-[#070210] border border-[#180c2a] text-xs text-cyan-300 rounded-xl p-2.5 outline-none focus:border-cyan-400 uppercase font-mono shadow-inner font-bold">
-                            <div id="resetSearchResultsBox" class="hidden absolute left-0 right-0 top-full mt-1 bg-[#0d061c] border border-cyan-500/40 rounded-xl max-h-48 overflow-y-auto z-30 shadow-2xl p-1.5 space-y-1 no-scrollbar"></div>
+                        <div class="space-y-2 relative">
+                            <label class="rk-label" for="resetKeySearchInput">Step 2 — Choose / Enter License Key</label>
+                            <input type="text" id="resetKeySearchInput" placeholder="PASTE OR SELECT LICENSE KEY..." oninput="onResetKeyType(this.value)" onfocus="onResetKeyType(this.value)" class="rk-input rk-key" spellcheck="false">
+                            <div id="resetSearchResultsBox" class="hidden rk-suggest"></div>
                         </div>
 
-                        <button type="submit" id="resetSubmitBtn" class="w-full py-3 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-gray-950 font-black text-xs uppercase tracking-wider transition active:scale-95 shadow-lg">
-                            Submit HWID Reset
-                        </button>
+                        <div class="space-y-2">
+                            <label class="rk-label">Step 3 — Confirm</label>
+                            <button type="submit" id="resetSubmitBtn" class="rk-btn w-full">
+                                <i class="fa-solid fa-arrows-rotate"></i> <span>RESET HWID NOW</span>
+                            </button>
+                        </div>
                     </form>
 
-                    <div id="resetResultBox" class="hidden p-3 rounded-xl border text-xs leading-relaxed font-sans shadow-md"></div>
+                    <div id="resetResultBox" class="hidden rk-result"></div>
                 <?php endif; ?>
             </div>
         </section>
@@ -6632,89 +6659,54 @@ document.addEventListener('DOMContentLoaded', function() {
 
         // ===================== 🔄 RESET: PRODUCT GRID (FF PANEL STYLE) =====================
         function escapeHtmlRs(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-        function selectResetProduct(prodId) {
-            if (!isUserLoggedIn) { openAuthModal('login'); showToast('Please login to reset your key!', 'error'); return; }
-            document.querySelectorAll('.reset-prod-card').forEach(c => {
-                const on = parseInt(c.dataset.resetProd) === prodId;
-                c.classList.toggle('border-cyan-400', on);
-                c.classList.toggle('shadow-[0_0_12px_rgba(0,245,255,0.35)]', on);
-            });
-            const card = document.querySelector('.reset-prod-card[data-reset-prod="' + prodId + '"]');
-            const prodName = card ? card.dataset.name : 'Product';
-            const box = document.getElementById('resetProdKeysBox');
-            const keys = allUserResetKeys.filter(k => parseInt(k.product_id || 0) === prodId);
-            let html = `<div class="flex items-center justify-between text-[10px] font-bold"><span class="text-cyan-300 uppercase">${escapeHtmlRs(prodName)} — Your Keys</span><button type="button" onclick="document.getElementById('resetProdKeysBox').classList.add('hidden')" class="text-gray-500 hover:text-white">✕</button></div>`;
-            if (!keys.length) {
-                html += `<p class="text-[10px] text-gray-400 font-sans py-2 text-center">এই প্রোডাক্টের কোনো কি আপনার অর্ডারে নেই। নিচে ম্যানুয়ালি কি পেস্ট করেও রিসেট দিতে পারেন।</p>`;
-            } else {
-                keys.forEach((k, i) => {
-                    html += `<div class="flex items-center justify-between gap-2 p-2 rounded-xl bg-[#0d061c] border border-[#241040]">
-                        <div class="min-w-0"><span class="block text-[11px] text-white font-mono font-bold truncate">${escapeHtmlRs(k.license_key)}</span><span class="text-[9px] text-gray-400">${escapeHtmlRs(k.validity || 'Key')}</span></div>
-                        <button type="button" data-key-idx="${i}" class="reset-one-btn flex-shrink-0 px-3 py-1.5 rounded-lg bg-gradient-to-r from-cyan-500 to-blue-600 text-gray-950 text-[10px] font-black uppercase active:scale-95">Reset</button>
-                    </div>`;
-                });
-            }
-            box.innerHTML = html;
-            box.classList.remove('hidden');
-            box.querySelectorAll('.reset-one-btn').forEach(b => b.addEventListener('click', () => {
-                const k = keys[parseInt(b.dataset.keyIdx)];
-                if (!k) return;
-                document.getElementById('resetKeySearchInput').value = k.license_key;
-                document.getElementById('liveResetForm').requestSubmit();
-            }));
-            box.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
-        }
         // ===================== KEY RESET =====================
-        function onResetSearchInput(query) {
-            const resultsBox = document.getElementById('resetSearchResultsBox');
-            const q = query.trim().toUpperCase();
-            resultsBox.innerHTML = '';
-            const matches = allUserResetKeys.filter(item => {
-                const k = (item.license_key || '').toUpperCase();
-                const v = (item.validity || '').toUpperCase();
-                return k.includes(q) || v.includes(q);
-            });
-            if (matches.length === 0) {
-                resultsBox.innerHTML = '<div class="p-2 text-center text-gray-500 text-[10px]">No key found</div>';
-                resultsBox.classList.remove('hidden');
-                return;
-            }
-            matches.slice(0, 15).forEach(item => {
+        // ===================== 🔄 RESET (3 STEP) =====================
+        function onResetKeyType(query) {
+            const box = document.getElementById('resetSearchResultsBox');
+            if (!box) return;
+            const q = (query || '').trim().toUpperCase();
+            const matches = allUserResetKeys.filter(it => !q || (it.license_key || '').toUpperCase().includes(q) || (it.validity || '').toUpperCase().includes(q)).slice(0, 15);
+            if (!matches.length) { box.classList.add('hidden'); return; }
+            box.innerHTML = '';
+            matches.forEach(it => {
                 const row = document.createElement('div');
-                row.className = "p-1.5 rounded-lg hover:bg-[#140826] cursor-pointer transition flex flex-col border border-transparent hover:border-cyan-500/30";
-                row.innerHTML = `<span class="font-mono font-bold text-cyan-300 text-[11px]">${item.license_key}</span><span class="text-[8px] text-gray-400 mt-0.5">${item.validity || 'Active'}</span>`;
-                row.onclick = () => { document.getElementById('resetKeySearchInput').value = item.license_key; resultsBox.classList.add('hidden'); };
-                resultsBox.appendChild(row);
+                row.className = 'rk-suggest-row';
+                row.innerHTML = `<span style="font-family:monospace;font-weight:700;color:#065f46;font-size:13px">${escapeHtmlRs(it.license_key)}</span><span style="font-size:11px;color:#6b7280">${escapeHtmlRs(it.validity || 'Purchased key')}</span>`;
+                row.onmousedown = (ev) => { ev.preventDefault(); document.getElementById('resetKeySearchInput').value = it.license_key; box.classList.add('hidden'); };
+                box.appendChild(row);
             });
-            resultsBox.classList.remove('hidden');
+            box.classList.remove('hidden');
         }
+        document.addEventListener('click', (ev) => {
+            const box = document.getElementById('resetSearchResultsBox');
+            if (box && !ev.target.closest('#resetSearchResultsBox') && ev.target.id !== 'resetKeySearchInput') box.classList.add('hidden');
+        });
         async function handleLiveKeyReset(e) {
             e.preventDefault();
+            const prodSel = document.getElementById('resetProductSelect');
+            const product = prodSel ? prodSel.value : '';
             const targetKey = document.getElementById('resetKeySearchInput').value.trim();
-            if (!targetKey) { showToast('Please enter a license key!', 'error'); return; }
+            const resultBox = document.getElementById('resetResultBox');
+            const show = (ok, msg) => { resultBox.className = 'rk-result ' + (ok ? 'ok' : 'err'); resultBox.innerHTML = (ok ? '✅ ' : '⚠️ ') + escapeHtmlRs(msg); resultBox.classList.remove('hidden'); };
+            if (!product) { show(false, 'Step 1: Please select a product!'); prodSel?.focus(); return; }
+            if (!targetKey) { show(false, 'Step 2: Please enter your license key!'); document.getElementById('resetKeySearchInput').focus(); return; }
             const btn = document.getElementById('resetSubmitBtn');
+            const btnHtml = btn.innerHTML;
             btn.disabled = true;
+            btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin"></i> <span>RESETTING...</span>';
             const formData = new FormData();
             formData.append('ajax_action', 'reset_key');
+            formData.append('reset_product', product);
             formData.append('license_key', targetKey);
             try {
                 const res = await fetch('index.php', { method: 'POST', body: formData });
                 const data = await res.json();
-                const resultBox = document.getElementById('resetResultBox');
-                resultBox.classList.remove('hidden');
-                if (data.status === 'success') {
-                    resultBox.className = "p-2.5 rounded-lg border border-emerald-500/40 bg-emerald-950/20 text-emerald-300 text-[11px] leading-relaxed font-sans";
-                    resultBox.innerHTML = `<b>Success:</b> ${data.message}`;
-                    showToast(data.message, 'success');
-                } else {
-                    resultBox.className = "p-2.5 rounded-lg border border-pink-500/40 bg-pink-950/20 text-pink-300 text-[11px] leading-relaxed font-sans";
-                    resultBox.innerHTML = `<b>Notice:</b> ${data.message}`;
-                    showToast(data.message, 'error');
-                }
+                show(data.status === 'success', data.message || 'Reset failed!');
+                showToast(data.message || 'Reset failed!', data.status === 'success' ? 'success' : 'error');
             } catch (err) {
-                showToast('Reset timeout!', 'error');
+                show(false, 'Network error / timeout. Please try again.');
             } finally {
-                btn.disabled = false;
+                btn.disabled = false; btn.innerHTML = btnHtml;
             }
         }
 
@@ -7012,12 +7004,6 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
 
-        // --- RESET DROPDOWN SELECT ---
-        function onResetDropdownSelect(val) {
-            if (val) {
-                document.getElementById('resetKeySearchInput').value = val;
-            }
-        }
 
         // ===================== INITIALIZATION =====================
         window.addEventListener('DOMContentLoaded', () => {
