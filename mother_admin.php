@@ -129,6 +129,26 @@ if ($runSchemaMigrations) try {
     safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
     safeAddCol($pdo, 'products', 'reset_enabled', 'TINYINT(1) NOT NULL DEFAULT 1');
     safeAddCol($pdo, 'products', 'km_api_id', 'INT NOT NULL DEFAULT 0');
+    // 🎟️ COUPON ENGINE v2 কলাম
+    safeAddCol($pdo, 'coupons', 'max_uses', 'INT NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'coupons', 'used_count', 'INT NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'coupons', 'per_user_limit', 'INT NOT NULL DEFAULT 1');
+    safeAddCol($pdo, 'coupons', 'starts_at', 'DATETIME NULL');
+    safeAddCol($pdo, 'coupons', 'expires_at', 'DATETIME NULL');
+    safeAddCol($pdo, 'coupons', 'max_discount', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00');
+    safeAddCol($pdo, 'coupons', 'user_role', "VARCHAR(20) NOT NULL DEFAULT 'all'");
+    safeAddCol($pdo, 'coupons', 'title', 'VARCHAR(150) NULL');
+    try { $pdo->exec("CREATE TABLE IF NOT EXISTS `coupon_usages` (
+      `id` INT AUTO_INCREMENT PRIMARY KEY,
+      `coupon_id` INT NOT NULL,
+      `subdomain_id` INT NOT NULL DEFAULT 0,
+      `user_id` INT NOT NULL,
+      `product_id` INT NULL,
+      `discount_bdt` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+      `order_total_bdt` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX `idx_cu_coupon_user` (`coupon_id`, `user_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"); } catch (Throwable $e) {}
     safeAddCol($pdo, 'product_plans', 'reward_coins', 'INT DEFAULT 0');
     safeAddCol($pdo, 'product_plans', 'coin_price', 'INT DEFAULT 0');
 
@@ -1904,29 +1924,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     }
 
     // --- COUPON SAVE & DELETE ACTIONS ---
+    // 🎟️ COUPON SAVE (CREATE / EDIT) — সময়সীমা, কতজন ব্যবহার করতে পারবে, ইউজার প্রতি লিমিট
     if ($act === 'save_coupon') {
-        $code       = strtoupper(trim($_POST['coupon_code'] ?? ''));
-        $discType   = in_array($_POST['discount_type'] ?? '', ['percent', 'fixed']) ? $_POST['discount_type'] : 'percent';
+        $cpScope    = 0;
+        $cpId       = (int)($_POST['coupon_id'] ?? 0);
+        $code       = strtoupper(preg_replace('/[^A-Za-z0-9_-]/', '', trim($_POST['coupon_code'] ?? '')));
+        $discType   = in_array($_POST['discount_type'] ?? '', ['percent', 'fixed'], true) ? $_POST['discount_type'] : 'percent';
         $discVal    = max(0.01, (float)($_POST['discount_value'] ?? 0));
-        $targetType = in_array($_POST['target_type'] ?? '', ['all', 'specific']) ? $_POST['target_type'] : 'all';
-        $expiryDate = !empty($_POST['expiry_date']) ? $_POST['expiry_date'] : null;
+        if ($discType === 'percent') $discVal = min(100.0, $discVal);
+        $targetType = in_array($_POST['target_type'] ?? '', ['all', 'specific'], true) ? $_POST['target_type'] : 'all';
+        $prodIds    = ($targetType === 'specific' && !empty($_POST['product_ids']) && is_array($_POST['product_ids'])) ? implode(',', array_map('intval', $_POST['product_ids'])) : '';
+        $minSpend   = max(0.0, (float)($_POST['min_spend'] ?? 0));
+        $maxDisc    = max(0.0, (float)($_POST['max_discount'] ?? 0));
+        $maxUses    = max(0, (int)($_POST['max_uses'] ?? 0));
+        $perUser    = max(0, (int)($_POST['per_user_limit'] ?? 1));
+        $userRoleC  = in_array($_POST['user_role'] ?? 'all', ['all', 'customer', 'reseller'], true) ? $_POST['user_role'] : 'all';
+        $title      = trim($_POST['title'] ?? '');
+        $startsAt   = !empty($_POST['starts_at']) ? date('Y-m-d H:i:s', strtotime($_POST['starts_at'])) : null;
+        $expiresAt  = !empty($_POST['expires_at']) ? date('Y-m-d H:i:s', strtotime($_POST['expires_at'])) : null;
+        $expiryDate = $expiresAt ? substr($expiresAt, 0, 10) : null;
+        $isActiveC  = isset($_POST['is_active']) ? 1 : 0;
 
-        if (!empty($code)) {
+        if ($code === '') {
+            $toast = ['type' => 'error', 'msg' => 'Coupon code is required!'];
+        } elseif ($startsAt && $expiresAt && strtotime($expiresAt) <= strtotime($startsAt)) {
+            $toast = ['type' => 'error', 'msg' => 'End time must be after start time!'];
+        } else {
             try {
-                $stmt = $pdo->prepare("INSERT INTO coupons (subdomain_id, code, discount_type, discount_value, target_type, expiry_date) VALUES (0, ?, ?, ?, ?, ?)");
-                $stmt->execute([$code, $discType, $discVal, $targetType, $expiryDate]);
-                $toast = ['type' => 'success', 'msg' => "Coupon '$code' created successfully!"];
+                $dup = $pdo->prepare("SELECT id FROM coupons WHERE UPPER(code) = ? AND subdomain_id = ? AND id != ? LIMIT 1");
+                $dup->execute([$code, $cpScope, $cpId]);
+                if ($dup->fetch()) {
+                    $toast = ['type' => 'error', 'msg' => "Coupon '$code' already exists!"];
+                } elseif ($cpId > 0) {
+                    $pdo->prepare("UPDATE coupons SET code = ?, title = ?, discount_type = ?, discount_value = ?, max_discount = ?, target_type = ?, product_ids = ?, min_spend = ?, max_uses = ?, per_user_limit = ?, user_role = ?, starts_at = ?, expires_at = ?, expiry_date = ?, is_active = ? WHERE id = ? AND subdomain_id = ?")
+                        ->execute([$code, $title ?: null, $discType, $discVal, $maxDisc, $targetType, $prodIds, $minSpend, $maxUses, $perUser, $userRoleC, $startsAt, $expiresAt, $expiryDate, $isActiveC, $cpId, $cpScope]);
+                    $toast = ['type' => 'success', 'msg' => "Coupon '$code' updated!"];
+                } else {
+                    $pdo->prepare("INSERT INTO coupons (subdomain_id, code, title, discount_type, discount_value, max_discount, target_type, product_ids, min_spend, max_uses, used_count, per_user_limit, user_role, starts_at, expires_at, expiry_date, is_active) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?)")
+                        ->execute([$cpScope, $code, $title ?: null, $discType, $discVal, $maxDisc, $targetType, $prodIds, $minSpend, $maxUses, $perUser, $userRoleC, $startsAt, $expiresAt, $expiryDate, $isActiveC]);
+                    $toast = ['type' => 'success', 'msg' => "Coupon '$code' created!"];
+                }
             } catch (Throwable $e) {
-                $toast = ['type' => 'error', 'msg' => 'Error: ' . $e->getMessage()];
+                $toast = ['type' => 'error', 'msg' => 'Coupon error: ' . $e->getMessage()];
             }
         }
     }
 
+    if ($act === 'toggle_coupon') {
+        $cpId = (int)($_POST['coupon_id'] ?? 0);
+        if ($cpId > 0) {
+            $pdo->prepare("UPDATE coupons SET is_active = IF(is_active = 1, 0, 1) WHERE id = ? AND subdomain_id = ?")->execute([$cpId, 0]);
+            $toast = ['type' => 'success', 'msg' => 'Coupon status changed!'];
+        }
+    }
+
     if ($act === 'delete_coupon') {
-        $couponId = (int)($_POST['coupon_id'] ?? 0);
-        if ($couponId > 0) {
-            $pdo->prepare("DELETE FROM coupons WHERE id = ? AND subdomain_id = 0")->execute([$couponId]);
-            $toast = ['type' => 'success', 'msg' => 'Coupon deleted successfully!'];
+        $cpId = (int)($_POST['coupon_id'] ?? 0);
+        if ($cpId > 0) {
+            $pdo->prepare("DELETE FROM coupons WHERE id = ? AND subdomain_id = ?")->execute([$cpId, 0]);
+            try { $pdo->prepare("DELETE FROM coupon_usages WHERE coupon_id = ?")->execute([$cpId]); } catch (Throwable $e) {}
+            $toast = ['type' => 'success', 'msg' => 'Coupon deleted!'];
         }
     }
 
@@ -2932,114 +2989,275 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                 </div>
                             </div>
                         <?php endforeach; ?>
+                    </div>
+                </div>
+            </div>
+            <!-- (আগে এখানে ৩টা </div> মিসিং ছিল — তাই কুপন সেকশন রিসেলার সেকশনের ভেতরে লুকিয়ে থাকত) -->
 
-            <!-- SUB-SECTION 4: COUPON MANAGER HUB -->
+            <!-- SUB-SECTION 4: 🎟️ COUPON MANAGER (v2) -->
             <div id="disc-view-coupons" class="hidden space-y-4">
+                <?php
+                $cpScopeId = 0;
+                $cpList = [];
+                try {
+                    $stCp = $pdo->prepare("SELECT * FROM coupons WHERE subdomain_id = ? ORDER BY id DESC");
+                    $stCp->execute([$cpScopeId]);
+                    $cpList = $stCp->fetchAll(PDO::FETCH_ASSOC);
+                } catch (Throwable $e) {}
+                $cpProdNames = [];
+                foreach ($productsData as $__pd) { $cpProdNames[(int)$__pd['id']] = $__pd['name']; }
+                ?>
                 <div class="box-panel p-5 space-y-4 border-fuchsia-500/30">
-                    <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+                    <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
                         <h3 class="text-xs font-black text-fuchsia-300 uppercase tracking-wider flex items-center gap-2">
                             <i class="fa-solid fa-ticket text-fuchsia-400"></i> COUPON CODE MANAGER (MAIN DOMAIN)
                         </h3>
+                        <button type="button" onclick="cpResetForm()" class="px-3 py-1.5 rounded-lg bg-fuchsia-600 hover:bg-fuchsia-500 text-white text-[11px] font-black uppercase">+ New Coupon</button>
                     </div>
 
-                    <!-- Create Coupon Form -->
-                    <form method="POST" class="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-3 text-xs font-mono">
+                    <form method="POST" id="couponForm" class="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-3 text-xs font-mono">
                         <input type="hidden" name="admin_action" value="save_coupon">
                         <input type="hidden" name="active_tab" value="tab-discounts">
                         <input type="hidden" name="disc_sub_tab" value="disc-view-coupons">
+                        <input type="hidden" name="coupon_id" id="cpFormId" value="0">
 
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                        <div id="cpFormModeLabel" class="text-[11px] font-black text-fuchsia-300 uppercase">➕ Create New Coupon</div>
+
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                             <div>
-                                <label class="text-slate-300 block mb-1 font-bold">Coupon Code</label>
-                                <input type="text" name="coupon_code" required placeholder="e.g. VAI50" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none uppercase font-bold">
+                                <label class="text-slate-300 block mb-1 font-bold">Coupon Code *</label>
+                                <div class="flex gap-2">
+                                    <input type="text" name="coupon_code" id="cpFormCode" required placeholder="e.g. EID50" class="w-full min-w-0 bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none uppercase font-bold tracking-wider">
+                                    <button type="button" onclick="cpGenerateCode()" class="px-3 rounded-xl bg-slate-800 text-cyan-300 font-bold text-[10px] uppercase whitespace-nowrap">Random</button>
+                                </div>
                             </div>
                             <div>
+                                <label class="text-slate-300 block mb-1 font-bold">Title / Note (optional)</label>
+                                <input type="text" name="title" id="cpFormTitle" placeholder="e.g. Eid Special Offer" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                            <div>
                                 <label class="text-slate-300 block mb-1 font-bold">Discount Type</label>
-                                <select name="discount_type" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-cyan-300 font-bold outline-none">
-                                    <option value="percent">Percentage (%)</option>
-                                    <option value="fixed">Fixed Amount (BDT)</option>
+                                <select name="discount_type" id="cpFormType" onchange="cpTypeChanged()" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-cyan-300 font-bold outline-none">
+                                    <option value="percent">Percent (%)</option>
+                                    <option value="fixed">Fixed (৳ BDT)</option>
                                 </select>
                             </div>
                             <div>
-                                <label class="text-slate-300 block mb-1 font-bold">Discount Value</label>
-                                <input type="number" step="0.01" name="discount_value" required placeholder="10" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-emerald-400 font-bold outline-none">
+                                <label class="text-slate-300 block mb-1 font-bold"><span id="cpValueLabel">Discount %</span> *</label>
+                                <input type="number" step="0.01" min="0.01" name="discount_value" id="cpFormValue" required placeholder="10" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-emerald-400 font-black outline-none">
+                            </div>
+                            <div id="cpMaxDiscWrap" class="col-span-2 sm:col-span-1">
+                                <label class="text-slate-300 block mb-1 font-bold">Max Discount ৳ <span class="text-slate-500 font-normal">(0 = no cap)</span></label>
+                                <input type="number" step="1" min="0" name="max_discount" id="cpFormMaxDisc" value="0" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-amber-300 font-bold outline-none">
+                            </div>
+                        </div>
+
+                        <div class="grid grid-cols-2 sm:grid-cols-3 gap-3">
+                            <div>
+                                <label class="text-slate-300 block mb-1 font-bold">👥 Total Uses <span class="text-slate-500 font-normal">(0 = ∞)</span></label>
+                                <input type="number" min="0" step="1" name="max_uses" id="cpFormMaxUses" value="100" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white font-bold outline-none">
+                            </div>
+                            <div>
+                                <label class="text-slate-300 block mb-1 font-bold">👤 Per User <span class="text-slate-500 font-normal">(0 = ∞)</span></label>
+                                <input type="number" min="0" step="1" name="per_user_limit" id="cpFormPerUser" value="1" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white font-bold outline-none">
+                            </div>
+                            <div class="col-span-2 sm:col-span-1">
+                                <label class="text-slate-300 block mb-1 font-bold">Min Order ৳ <span class="text-slate-500 font-normal">(0 = none)</span></label>
+                                <input type="number" min="0" step="1" name="min_spend" id="cpFormMinSpend" value="0" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white font-bold outline-none">
                             </div>
                         </div>
 
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
                             <div>
-                                <label class="text-slate-300 block mb-1 font-bold">Target Products</label>
-                                <select name="target_type" onchange="document.getElementById('couponProdSelectBoxMain').classList.toggle('hidden', this.value !== 'specific')" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-amber-300 font-bold outline-none">
-                                    <option value="all">All Products (Global)</option>
-                                    <option value="specific">Specific Products Only</option>
-                                </select>
+                                <label class="text-slate-300 block mb-1 font-bold">⏰ Starts At <span class="text-slate-500 font-normal">(empty = now)</span></label>
+                                <input type="datetime-local" name="starts_at" id="cpFormStarts" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none">
                             </div>
                             <div>
-                                <label class="text-slate-300 block mb-1 font-bold">Expiry Date (Optional)</label>
-                                <input type="date" name="expiry_date" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none">
+                                <label class="text-slate-300 block mb-1 font-bold">⌛ Ends At <span class="text-slate-500 font-normal">(empty = never)</span></label>
+                                <input type="datetime-local" name="expires_at" id="cpFormEnds" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none">
+                                <div class="flex flex-wrap gap-1.5 mt-1.5">
+                                    <?php foreach ([['1 Hour', 1], ['24 Hours', 24], ['3 Days', 72], ['7 Days', 168], ['30 Days', 720]] as $__q): ?>
+                                        <button type="button" onclick="cpQuickExpiry(<?= $__q[1] ?>)" class="px-2 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-[10px] text-cyan-300 font-bold"><?= $__q[0] ?></button>
+                                    <?php endforeach; ?>
+                                </div>
                             </div>
                         </div>
 
-                        <div id="couponProdSelectBoxMain" class="hidden space-y-1">
-                            <label class="text-slate-400 text-[10px] block font-bold">Select Eligible Products:</label>
-                            <div class="max-h-32 overflow-y-auto bg-[#030612] p-2.5 rounded-xl border border-slate-800 grid grid-cols-2 gap-2">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                                <label class="text-slate-300 block mb-1 font-bold">Who Can Use</label>
+                                <select name="user_role" id="cpFormRole" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-purple-300 font-bold outline-none">
+                                    <option value="all">Everyone</option>
+                                    <option value="customer">Customers only</option>
+                                    <option value="reseller">Resellers only</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label class="text-slate-300 block mb-1 font-bold">Products</label>
+                                <select name="target_type" id="cpFormTarget" onchange="document.getElementById('cpProdBox').classList.toggle('hidden', this.value !== 'specific')" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-amber-300 font-bold outline-none">
+                                    <option value="all">All Products</option>
+                                    <option value="specific">Specific Products Only</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <div id="cpProdBox" class="hidden">
+                            <div class="max-h-36 overflow-y-auto bg-[#030612] p-2.5 rounded-xl border border-slate-800 grid grid-cols-2 gap-2">
                                 <?php foreach ($productsData as $pd): ?>
-                                    <label class="flex items-center space-x-2 text-slate-300 text-xs cursor-pointer">
-                                        <input type="checkbox" name="product_ids[]" value="<?= $pd['id'] ?>" class="rounded text-cyan-500">
+                                    <label class="flex items-center gap-2 text-slate-300 text-xs cursor-pointer min-w-0">
+                                        <input type="checkbox" name="product_ids[]" value="<?= (int)$pd['id'] ?>" class="cp-prod-cb rounded text-cyan-500">
                                         <span class="truncate"><?= htmlspecialchars($pd['name']) ?></span>
                                     </label>
                                 <?php endforeach; ?>
                             </div>
                         </div>
 
-                        <button type="submit" class="w-full py-3 rounded-xl bg-gradient-to-r from-fuchsia-600 to-purple-600 text-white uppercase font-black text-xs shadow-md">
-                            + CREATE COUPON CODE
+                        <label class="flex items-center gap-2 text-emerald-300 font-bold cursor-pointer">
+                            <input type="checkbox" name="is_active" id="cpFormActive" value="1" checked class="rounded scale-110"> Active
+                        </label>
+
+                        <div id="cpPreview" class="p-2.5 rounded-xl bg-fuchsia-950/30 border border-fuchsia-500/30 text-[11px] text-fuchsia-200 font-sans leading-relaxed"></div>
+
+                        <button type="submit" id="cpFormSubmit" class="w-full py-3 rounded-xl bg-gradient-to-r from-fuchsia-600 to-purple-600 text-white uppercase font-black text-xs shadow-md">
+                            + CREATE COUPON
                         </button>
                     </form>
 
-                    <!-- Coupons Table -->
-                    <div class="overflow-x-auto rounded-xl border border-slate-800 bg-slate-900/40">
-                        <table class="table-roomy min-w-[600px] text-left text-xs font-mono">
-                            <thead>
-                                <tr>
-                                    <th>CODE</th>
-                                    <th>DISCOUNT</th>
-                                    <th>TARGET</th>
-                                    <th>EXPIRY</th>
-                                    <th class="text-right">ACTION</th>
-                                </tr>
-                            </thead>
-                            <tbody class="divide-y divide-slate-800/60 text-[11px]">
-                                <?php 
-                                $couponsList = $pdo->query("SELECT * FROM coupons WHERE subdomain_id = 0 ORDER BY id DESC")->fetchAll(PDO::FETCH_ASSOC);
-                                if (empty($couponsList)): 
-                                ?>
-                                    <tr><td colspan="5" class="py-6 text-center text-slate-500 font-sans">No coupon codes created yet.</td></tr>
-                                <?php else: ?>
-                                    <?php foreach ($couponsList as $cp): ?>
-                                        <tr>
-                                            <td class="font-bold text-fuchsia-300 tracking-wider"><?= htmlspecialchars($cp['code']) ?></td>
-                                            <td class="text-emerald-400 font-bold">
-                                                <?= $cp['discount_type'] === 'percent' ? $cp['discount_value'] . '%' : '৳' . $cp['discount_value'] ?>
-                                            </td>
-                                            <td class="text-cyan-300 uppercase"><?= htmlspecialchars($cp['target_type']) ?></td>
-                                            <td class="text-slate-400"><?= htmlspecialchars($cp['expiry_date'] ?? 'Lifetime') ?></td>
-                                            <td class="text-right">
-                                                <form method="POST" class="inline" onsubmit="return confirm('Delete this coupon?');">
-                                                    <input type="hidden" name="admin_action" value="delete_coupon">
-                                                    <input type="hidden" name="active_tab" value="tab-discounts">
-                                                    <input type="hidden" name="disc_sub_tab" value="disc-view-coupons">
-                                                    <input type="hidden" name="coupon_id" value="<?= $cp['id'] ?>">
-                                                    <button type="submit" class="text-red-400 hover:text-red-300 p-1"><i class="fa-solid fa-trash"></i></button>
-                                                </form>
-                                            </td>
-                                        </tr>
-                                    <?php endforeach; ?>
-                                <?php endif; ?>
-                            </tbody>
-                        </table>
+                    <!-- Coupon cards -->
+                    <div class="space-y-2.5">
+                        <?php if (empty($cpList)): ?>
+                            <p class="py-6 text-center text-slate-500 font-sans text-xs">No coupon codes created yet.</p>
+                        <?php endif; ?>
+                        <?php foreach ($cpList as $cp):
+                            $nowTs   = time();
+                            $stTs    = !empty($cp['starts_at']) ? strtotime($cp['starts_at']) : null;
+                            $exTs    = !empty($cp['expires_at']) ? strtotime($cp['expires_at']) : (!empty($cp['expiry_date']) ? strtotime($cp['expiry_date'] . ' 23:59:59') : null);
+                            $maxU    = (int)($cp['max_uses'] ?? 0);
+                            $usedU   = (int)($cp['used_count'] ?? 0);
+                            if ((int)($cp['is_active'] ?? 1) !== 1)       { $cpState = ['PAUSED', 'bg-slate-800 text-slate-400 border-slate-700']; }
+                            elseif ($exTs && $exTs < $nowTs)              { $cpState = ['EXPIRED', 'bg-red-950 text-red-400 border-red-500/40']; }
+                            elseif ($maxU > 0 && $usedU >= $maxU)         { $cpState = ['USED UP', 'bg-orange-950 text-orange-300 border-orange-500/40']; }
+                            elseif ($stTs && $stTs > $nowTs)              { $cpState = ['SCHEDULED', 'bg-sky-950 text-sky-300 border-sky-500/40']; }
+                            else                                          { $cpState = ['LIVE', 'bg-emerald-950 text-emerald-300 border-emerald-500/40']; }
+                            $offTxt  = ($cp['discount_type'] === 'percent') ? rtrim(rtrim(number_format((float)$cp['discount_value'], 2, '.', ''), '0'), '.') . '% OFF' : '৳' . number_format((float)$cp['discount_value'], 0) . ' OFF';
+                            $pct     = $maxU > 0 ? min(100, round($usedU / $maxU * 100)) : 0;
+                            $targets = [];
+                            if (($cp['target_type'] ?? 'all') === 'specific') {
+                                foreach (array_filter(explode(',', (string)$cp['product_ids'])) as $__pid) { if (isset($cpProdNames[(int)$__pid])) $targets[] = $cpProdNames[(int)$__pid]; }
+                            }
+                            $cpJson = [
+                                'id' => (int)$cp['id'], 'code' => $cp['code'], 'title' => $cp['title'] ?? '', 'discount_type' => $cp['discount_type'],
+                                'discount_value' => (float)$cp['discount_value'], 'max_discount' => (float)($cp['max_discount'] ?? 0),
+                                'max_uses' => $maxU, 'per_user_limit' => (int)($cp['per_user_limit'] ?? 1), 'min_spend' => (float)($cp['min_spend'] ?? 0),
+                                'starts_at' => $stTs ? date('Y-m-d\TH:i', $stTs) : '', 'expires_at' => $exTs ? date('Y-m-d\TH:i', $exTs) : '',
+                                'user_role' => $cp['user_role'] ?? 'all', 'target_type' => $cp['target_type'] ?? 'all',
+                                'product_ids' => array_values(array_filter(array_map('intval', explode(',', (string)$cp['product_ids'])))), 'is_active' => (int)($cp['is_active'] ?? 1),
+                            ];
+                        ?>
+                            <div class="rounded-2xl border border-slate-800 bg-[#050a1a] p-3 space-y-2 text-xs font-mono">
+                                <div class="flex flex-wrap items-center justify-between gap-2">
+                                    <div class="flex items-center gap-2 min-w-0">
+                                        <span class="px-2.5 py-1 rounded-lg bg-fuchsia-950/60 border border-dashed border-fuchsia-500/60 text-fuchsia-200 font-black tracking-widest truncate"><?= htmlspecialchars($cp['code']) ?></span>
+                                        <span class="text-emerald-400 font-black whitespace-nowrap"><?= $offTxt ?></span>
+                                    </div>
+                                    <span class="px-2 py-0.5 rounded-md border text-[9px] font-black <?= $cpState[1] ?>"><?= $cpState[0] ?></span>
+                                </div>
+                                <?php if (!empty($cp['title'])): ?><p class="text-[11px] text-slate-300 font-sans"><?= htmlspecialchars($cp['title']) ?></p><?php endif; ?>
+                                <div>
+                                    <div class="flex justify-between text-[10px] text-slate-400"><span>👥 Used: <b class="text-white"><?= $usedU ?></b> / <?= $maxU > 0 ? $maxU : '∞' ?></span><span>👤 Per user: <?= (int)($cp['per_user_limit'] ?? 1) > 0 ? (int)$cp['per_user_limit'] : '∞' ?></span></div>
+                                    <?php if ($maxU > 0): ?><div class="h-1.5 rounded-full bg-slate-800 mt-1 overflow-hidden"><div class="h-full bg-gradient-to-r from-fuchsia-500 to-purple-500" style="width: <?= $pct ?>%"></div></div><?php endif; ?>
+                                </div>
+                                <div class="flex flex-wrap gap-x-3 gap-y-1 text-[10px] text-slate-400">
+                                    <span>⏰ <?= $stTs ? date('d M y, h:i A', $stTs) : 'Now' ?> → <?= $exTs ? date('d M y, h:i A', $exTs) : 'No end' ?></span>
+                                    <?php if ((float)($cp['min_spend'] ?? 0) > 0): ?><span>Min ৳<?= number_format((float)$cp['min_spend'], 0) ?></span><?php endif; ?>
+                                    <?php if ($cp['discount_type'] === 'percent' && (float)($cp['max_discount'] ?? 0) > 0): ?><span>Max ৳<?= number_format((float)$cp['max_discount'], 0) ?></span><?php endif; ?>
+                                    <span><?= ($cp['user_role'] ?? 'all') === 'all' ? 'Everyone' : ucfirst($cp['user_role']) . 's' ?></span>
+                                    <span><?= empty($targets) ? 'All products' : htmlspecialchars(implode(', ', $targets)) ?></span>
+                                </div>
+                                <div class="flex flex-wrap gap-2 pt-1">
+                                    <button type="button" onclick='cpEdit(<?= json_encode($cpJson, JSON_HEX_TAG | JSON_HEX_APOS | JSON_HEX_QUOT | JSON_HEX_AMP) ?>)' class="px-3 py-1.5 rounded-lg bg-cyan-950/70 border border-cyan-500/30 text-cyan-300 font-bold text-[10px] uppercase">✏️ Edit</button>
+                                    <form method="POST" class="inline">
+                                        <input type="hidden" name="admin_action" value="toggle_coupon">
+                                        <input type="hidden" name="active_tab" value="tab-discounts">
+                                        <input type="hidden" name="disc_sub_tab" value="disc-view-coupons">
+                                        <input type="hidden" name="coupon_id" value="<?= (int)$cp['id'] ?>">
+                                        <button type="submit" class="px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-slate-200 font-bold text-[10px] uppercase"><?= (int)($cp['is_active'] ?? 1) === 1 ? '⏸ Pause' : '▶ Resume' ?></button>
+                                    </form>
+                                    <form method="POST" class="inline" onsubmit="return confirm('Delete coupon <?= htmlspecialchars($cp['code'], ENT_QUOTES) ?>?');">
+                                        <input type="hidden" name="admin_action" value="delete_coupon">
+                                        <input type="hidden" name="active_tab" value="tab-discounts">
+                                        <input type="hidden" name="disc_sub_tab" value="disc-view-coupons">
+                                        <input type="hidden" name="coupon_id" value="<?= (int)$cp['id'] ?>">
+                                        <button type="submit" class="px-3 py-1.5 rounded-lg bg-red-950/50 border border-red-500/30 text-red-400 font-bold text-[10px] uppercase">🗑 Delete</button>
+                                    </form>
+                                </div>
+                            </div>
+                        <?php endforeach; ?>
                     </div>
                 </div>
+                <script>
+                    function cpTypeChanged() {
+                        const t = document.getElementById('cpFormType').value;
+                        document.getElementById('cpValueLabel').textContent = t === 'percent' ? 'Discount %' : 'Discount ৳';
+                        document.getElementById('cpMaxDiscWrap').style.opacity = t === 'percent' ? '1' : '.35';
+                        document.getElementById('cpFormMaxDisc').disabled = t !== 'percent';
+                        cpPreview();
+                    }
+                    function cpPad(n) { return String(n).padStart(2, '0'); }
+                    function cpLocal(d) { return d.getFullYear() + '-' + cpPad(d.getMonth() + 1) + '-' + cpPad(d.getDate()) + 'T' + cpPad(d.getHours()) + ':' + cpPad(d.getMinutes()); }
+                    function cpQuickExpiry(hours) {
+                        const startVal = document.getElementById('cpFormStarts').value;
+                        const base = startVal ? new Date(startVal) : new Date();
+                        document.getElementById('cpFormEnds').value = cpLocal(new Date(base.getTime() + hours * 3600 * 1000));
+                        cpPreview();
+                    }
+                    function cpGenerateCode() {
+                        const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; let c = '';
+                        for (let i = 0; i < 8; i++) c += chars[Math.floor(Math.random() * chars.length)];
+                        document.getElementById('cpFormCode').value = c; cpPreview();
+                    }
+                    function cpPreview() {
+                        const g = id => document.getElementById(id);
+                        const t = g('cpFormType').value, v = parseFloat(g('cpFormValue').value) || 0;
+                        const maxU = parseInt(g('cpFormMaxUses').value) || 0, perU = parseInt(g('cpFormPerUser').value) || 0;
+                        const minS = parseFloat(g('cpFormMinSpend').value) || 0, cap = parseFloat(g('cpFormMaxDisc').value) || 0;
+                        const st = g('cpFormStarts').value, en = g('cpFormEnds').value;
+                        const fmt = s => s ? new Date(s).toLocaleString('en-GB', { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+                        let txt = `🎟️ <b>${(g('cpFormCode').value || 'CODE').toUpperCase()}</b> দিলে <b>${t === 'percent' ? v + '%' : '৳' + v}</b> ছাড়`;
+                        if (t === 'percent' && cap > 0) txt += ` (সর্বোচ্চ ৳${cap})`;
+                        txt += `। মোট <b>${maxU > 0 ? maxU + ' বার' : 'আনলিমিটেড'}</b> ব্যবহার করা যাবে, প্রতি ইউজার <b>${perU > 0 ? perU + ' বার' : 'আনলিমিটেড'}</b>।`;
+                        if (minS > 0) txt += ` মিনিমাম অর্ডার ৳${minS}।`;
+                        txt += ` সময়: <b>${st ? fmt(st) : 'এখন থেকে'}</b> → <b>${en ? fmt(en) : 'কোনো শেষ নেই'}</b>।`;
+                        g('cpPreview').innerHTML = txt;
+                    }
+                    function cpResetForm() {
+                        const f = document.getElementById('couponForm'); f.reset();
+                        document.getElementById('cpFormId').value = '0';
+                        document.getElementById('cpFormModeLabel').textContent = '➕ Create New Coupon';
+                        document.getElementById('cpFormSubmit').textContent = '+ CREATE COUPON';
+                        document.getElementById('cpProdBox').classList.add('hidden');
+                        cpTypeChanged(); f.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                    function cpEdit(c) {
+                        const g = id => document.getElementById(id);
+                        g('cpFormId').value = c.id; g('cpFormCode').value = c.code; g('cpFormTitle').value = c.title || '';
+                        g('cpFormType').value = c.discount_type; g('cpFormValue').value = c.discount_value; g('cpFormMaxDisc').value = c.max_discount || 0;
+                        g('cpFormMaxUses').value = c.max_uses; g('cpFormPerUser').value = c.per_user_limit; g('cpFormMinSpend').value = c.min_spend || 0;
+                        g('cpFormStarts').value = c.starts_at || ''; g('cpFormEnds').value = c.expires_at || '';
+                        g('cpFormRole').value = c.user_role || 'all'; g('cpFormTarget').value = c.target_type || 'all';
+                        g('cpProdBox').classList.toggle('hidden', c.target_type !== 'specific');
+                        document.querySelectorAll('.cp-prod-cb').forEach(cb => { cb.checked = (c.product_ids || []).includes(parseInt(cb.value)); });
+                        g('cpFormActive').checked = parseInt(c.is_active) === 1;
+                        g('cpFormModeLabel').textContent = '✏️ Editing ' + c.code;
+                        g('cpFormSubmit').textContent = '💾 UPDATE COUPON';
+                        cpTypeChanged(); document.getElementById('couponForm').scrollIntoView({ behavior: 'smooth', block: 'start' });
+                    }
+                    document.getElementById('couponForm').addEventListener('input', cpPreview);
+                    cpTypeChanged();
+                </script>
             </div>
 </section>
 

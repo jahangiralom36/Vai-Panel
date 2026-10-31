@@ -343,6 +343,28 @@ if ($runSchemaMigrations) try {
         `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
+
+    // 🎟️ COUPON ENGINE v2: সময়সীমা, ব্যবহার লিমিট, ইউজার প্রতি লিমিট, সর্বোচ্চ ছাড়, রোল
+    safeAddCol($pdo, 'coupons', 'max_uses', 'INT NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'coupons', 'used_count', 'INT NOT NULL DEFAULT 0');
+    safeAddCol($pdo, 'coupons', 'per_user_limit', 'INT NOT NULL DEFAULT 1');
+    safeAddCol($pdo, 'coupons', 'starts_at', 'DATETIME NULL');
+    safeAddCol($pdo, 'coupons', 'expires_at', 'DATETIME NULL');
+    safeAddCol($pdo, 'coupons', 'max_discount', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00');
+    safeAddCol($pdo, 'coupons', 'user_role', "VARCHAR(20) NOT NULL DEFAULT 'all'");
+    safeAddCol($pdo, 'coupons', 'title', 'VARCHAR(150) NULL');
+    $pdo->exec("CREATE TABLE IF NOT EXISTS `coupon_usages` (
+      `id` INT AUTO_INCREMENT PRIMARY KEY,
+      `coupon_id` INT NOT NULL,
+      `subdomain_id` INT NOT NULL DEFAULT 0,
+      `user_id` INT NOT NULL,
+      `product_id` INT NULL,
+      `discount_bdt` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
+      `order_total_bdt` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
+      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+      INDEX `idx_cu_coupon_user` (`coupon_id`, `user_id`)
+    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+
     // ২. প্রোডাক্ট কাস্টম মেইনটেনেন্স মেসেজ কলাম
     safeAddCol($pdo, 'products', 'maintenance_msg', 'TEXT NULL');
     safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
@@ -577,6 +599,84 @@ $globalPaymentBanner = !empty($settings['payment_banner_url']) ? $settings['paym
 $globalAppDownloadUrl = !empty($tenant['apk_url']) 
     ? $tenant['apk_url'] 
     : (!empty($settings['app_download_url']) ? $settings['app_download_url'] : '');
+
+
+// ====================================================================
+// 🎟️ COUPON ENGINE — প্রিভিউ এবং আসল পেমেন্ট দুই জায়গাতেই একই নিয়ম
+// সব অ্যামাউন্ট BDT তে। রিটার্ন: ['ok'=>bool, 'message'=>..., 'discount_bdt'=>..., 'coupon'=>row]
+// ====================================================================
+if (!function_exists('vpValidateCoupon')) {
+    function vpValidateCoupon(PDO $pdo, string $code, int $subId, int $userId, string $role, int $productId, float $amountBdt): array {
+        $code = strtoupper(trim($code));
+        if ($code === '') return ['ok' => false, 'message' => 'Please enter a coupon code!'];
+        try {
+            $st = $pdo->prepare("SELECT * FROM coupons WHERE UPPER(code) = ? AND subdomain_id = ? LIMIT 1");
+            $st->execute([$code, $subId]);
+            $c = $st->fetch(PDO::FETCH_ASSOC);
+        } catch (Throwable $e) { $c = false; }
+        if (!$c || (int)($c['is_active'] ?? 1) !== 1) return ['ok' => false, 'message' => 'Invalid coupon code!'];
+
+        $now = time();
+        if (!empty($c['starts_at']) && strtotime($c['starts_at']) > $now) {
+            return ['ok' => false, 'message' => 'This coupon starts on ' . date('d M Y, h:i A', strtotime($c['starts_at'])) . '!'];
+        }
+        $expTs = null;
+        if (!empty($c['expires_at']))      $expTs = strtotime($c['expires_at']);
+        elseif (!empty($c['expiry_date'])) $expTs = strtotime($c['expiry_date'] . ' 23:59:59');
+        if ($expTs !== null && $expTs !== false && $expTs < $now) return ['ok' => false, 'message' => 'This coupon has expired!'];
+
+        $maxUses = (int)($c['max_uses'] ?? 0);
+        if ($maxUses > 0 && (int)($c['used_count'] ?? 0) >= $maxUses) return ['ok' => false, 'message' => 'This coupon has reached its usage limit!'];
+
+        $cRole = strtolower((string)($c['user_role'] ?? 'all'));
+        if ($cRole !== 'all' && $cRole !== '' && $cRole !== strtolower($role)) {
+            return ['ok' => false, 'message' => 'This coupon is only for ' . ucfirst($cRole) . 's!'];
+        }
+
+        $perUser = (int)($c['per_user_limit'] ?? 1);
+        if ($perUser > 0 && $userId > 0) {
+            try {
+                $su = $pdo->prepare("SELECT COUNT(*) FROM coupon_usages WHERE coupon_id = ? AND user_id = ?");
+                $su->execute([(int)$c['id'], $userId]);
+                if ((int)$su->fetchColumn() >= $perUser) {
+                    return ['ok' => false, 'message' => $perUser === 1 ? 'You have already used this coupon!' : "You can use this coupon only $perUser times!"];
+                }
+            } catch (Throwable $e) {}
+        }
+
+        if (($c['target_type'] ?? 'all') === 'specific') {
+            $allowed = array_filter(array_map('trim', explode(',', (string)($c['product_ids'] ?? ''))));
+            if (!in_array((string)$productId, $allowed, true)) return ['ok' => false, 'message' => 'This coupon is not valid for this product!'];
+        }
+
+        $minSpend = (float)($c['min_spend'] ?? 0);
+        if ($minSpend > 0 && $amountBdt < $minSpend) {
+            return ['ok' => false, 'message' => 'Minimum order ৳' . number_format($minSpend, 0) . ' BDT required for this coupon!'];
+        }
+
+        if (($c['discount_type'] ?? 'percent') === 'percent') {
+            $disc = round($amountBdt * min(100.0, (float)$c['discount_value']) / 100, 2);
+            $cap  = (float)($c['max_discount'] ?? 0);
+            if ($cap > 0) $disc = min($disc, $cap);
+        } else {
+            $disc = (float)$c['discount_value'];
+        }
+        $disc = round(min(max(0.0, $disc), max(0.0, $amountBdt - 1)), 0);
+        if ($disc <= 0) return ['ok' => false, 'message' => 'Coupon gives no discount on this order.'];
+
+        $usesLeft = $maxUses > 0 ? max(0, $maxUses - (int)($c['used_count'] ?? 0)) : null;
+        return ['ok' => true, 'message' => 'Coupon applied!', 'discount_bdt' => $disc, 'coupon' => $c, 'uses_left' => $usesLeft, 'expires_ts' => $expTs];
+    }
+}
+if (!function_exists('vpRecordCouponUse')) {
+    function vpRecordCouponUse(PDO $pdo, array $coupon, int $subId, int $userId, int $productId, float $discBdt, float $orderBdt): void {
+        try {
+            $pdo->prepare("UPDATE coupons SET used_count = used_count + 1 WHERE id = ?")->execute([(int)$coupon['id']]);
+            $pdo->prepare("INSERT INTO coupon_usages (coupon_id, subdomain_id, user_id, product_id, discount_bdt, order_total_bdt) VALUES (?, ?, ?, ?, ?, ?)")
+                ->execute([(int)$coupon['id'], $subId, $userId, $productId, $discBdt, $orderBdt]);
+        } catch (Throwable $e) {}
+    }
+}
 
 // ====================================================================
 // 4B. TELEGRAM BOT NOTIFICATION ENGINE (MAIN + TENANT)
@@ -1158,47 +1258,26 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'apply_coupon') {
         exit;
     }
 
-    $stmtC = $pdo->prepare("SELECT * FROM coupons WHERE UPPER(code) = ? AND subdomain_id = ? AND is_active = 1 LIMIT 1");
-    $stmtC->execute([$couponCode, $currentSubdomainId]);
-    $coupon = $stmtC->fetch(PDO::FETCH_ASSOC);
-
-    if (!$coupon) {
-        echo json_encode(['status' => 'error', 'message' => 'Invalid or expired coupon code!']);
+    $cv = vpValidateCoupon($pdo, $couponCode, $currentSubdomainId, (int)($user['id'] ?? 0), $userRole, $productId, $planPrice);
+    if (!$cv['ok']) {
+        echo json_encode(['status' => 'error', 'message' => $cv['message']]);
         exit;
     }
-
-    // এক্সপায়ারি ডেট চেক
-    if (!empty($coupon['expiry_date']) && strtotime($coupon['expiry_date']) < strtotime(date('Y-m-d'))) {
-        echo json_encode(['status' => 'error', 'message' => 'This coupon has expired!']);
-        exit;
-    }
-
-    // প্রোডাক্ট প্রযোজ্যতা চেক (All products নাকি নির্দিষ্ট প্রোডাক্ট)
-    if ($coupon['target_type'] === 'specific') {
-        $allowedProds = array_filter(array_map('trim', explode(',', $coupon['product_ids'] ?? '')));
-        if (!in_array((string)$productId, $allowedProds)) {
-            echo json_encode(['status' => 'error', 'message' => 'This coupon is not valid for this product!']);
-            exit;
-        }
-    }
-
-    // ডিসকাউন্ট ক্যালকুলেশন
-    $discountAmount = 0.0;
-    if ($coupon['discount_type'] === 'percent') {
-        $discountAmount = round(($planPrice * (float)$coupon['discount_value']) / 100, 2);
-    } else {
-        $discountAmount = (float)$coupon['discount_value'];
-    }
-
-    $discountAmount = min($planPrice, max(0.0, $discountAmount));
-    $finalPrice = max(1.0, round($planPrice - $discountAmount, 0));
+    $discountAmount = (float)$cv['discount_bdt'];
+    $finalPrice     = max(1.0, round($planPrice - $discountAmount, 0));
+    $c = $cv['coupon'];
+    $offLabel = ($c['discount_type'] === 'percent') ? rtrim(rtrim(number_format((float)$c['discount_value'], 2, '.', ''), '0'), '.') . '% OFF' : '৳' . number_format((float)$c['discount_value'], 0) . ' OFF';
 
     echo json_encode([
         'status'          => 'success',
         'message'         => 'Coupon applied successfully!',
-        'coupon_code'     => $coupon['code'],
+        'coupon_code'     => $c['code'],
+        'off_label'       => $offLabel,
         'discount_amount' => $discountAmount,
-        'final_price_bdt' => $finalPrice
+        'final_price_bdt' => $finalPrice,
+        'base_price_bdt'  => $planPrice,
+        'uses_left'       => $cv['uses_left'],
+        'expires_at'      => $cv['expires_ts'] ? date('d M Y, h:i A', $cv['expires_ts']) : null
     ]);
     exit;
 }
@@ -1308,6 +1387,17 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
 
     $totalCostUsd = $unitPrice * $quantity;
     $totalCostBdt = round($totalCostUsd * $effectiveBdtRate, 0);
+
+    // 🎟️ কুপন (আসল পেমেন্টে)
+    $vpCouponApplied = null; $vpCouponDisc = 0.0; $vpOrderBdtBeforeCoupon = $totalCostBdt;
+    if (trim($_POST['coupon_code'] ?? '') !== '') {
+        $cv = vpValidateCoupon($pdo, (string)$_POST['coupon_code'], $currentSubdomainId, (int)$user['id'], $userRole, (int)$plan['real_product_id'], (float)$totalCostBdt);
+        if (!$cv['ok']) { echo json_encode(['status' => 'error', 'message' => '🎟️ ' . $cv['message']]); exit; }
+        $vpCouponApplied = $cv['coupon']; $vpCouponDisc = (float)$cv['discount_bdt'];
+        $totalCostBdt = max(1, round($totalCostBdt - $vpCouponDisc, 0));
+        $totalCostUsd = $totalCostBdt / max(1.0, $effectiveBdtRate);
+        $unitPrice    = $totalCostUsd / max(1, $quantity);
+    }
 
     $isAutoPaymentEnforced = (($settings['auto_payment_on'] ?? '0') === '1') || (($settings['snzpay_auto_verify'] ?? '0') === '1');
     $isVerified = false;
@@ -1472,6 +1562,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
             $pdo->prepare("INSERT INTO live_purchase_feed (subdomain_id, masked_username, product_name, amount_bdt) VALUES (?, ?, ?, ?)")
                 ->execute([$currentSubdomainId, maskUsername($user['username']), $productFullName, $totalCostBdt]);
         } catch (Throwable $e) {}
+
+        if ($vpCouponApplied) vpRecordCouponUse($pdo, $vpCouponApplied, $currentSubdomainId, (int)$user['id'], (int)$plan['real_product_id'], $vpCouponDisc, (float)$vpOrderBdtBeforeCoupon);
 
         $pdo->commit();
 
@@ -1762,16 +1854,15 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
 
     $totalCost = $unitPrice * $quantity;
 
-    // কুপন ডিসকাউন্ট অ্যাপ্লাই
+    // 🎟️ কুপন ডিসকাউন্ট (BDT তে হিসাব, তারপর USD তে রূপান্তর — আগে BDT ছাড় সরাসরি USD থেকে বিয়োগ হত)
+    $vpCouponApplied = null; $vpCouponDisc = 0.0; $vpOrderBdtBeforeCoupon = round($totalCost * $effectiveBdtRate, 0);
     $appliedCoupon = trim($_POST['coupon_code'] ?? '');
-    if (!empty($appliedCoupon)) {
-        $stmtC = $pdo->prepare("SELECT * FROM coupons WHERE UPPER(code) = ? AND subdomain_id = ? AND is_active = 1 LIMIT 1");
-        $stmtC->execute([strtoupper($appliedCoupon), $currentSubdomainId]);
-        $cRow = $stmtC->fetch(PDO::FETCH_ASSOC);
-        if ($cRow) {
-            $cDisc = ($cRow['discount_type'] === 'percent') ? round(($totalCost * (float)$cRow['discount_value']) / 100, 2) : (float)$cRow['discount_value'];
-            $totalCost = max(0.01, round($totalCost - $cDisc, 2));
-        }
+    if ($appliedCoupon !== '' && $paymentType !== 'coins') {
+        $cv = vpValidateCoupon($pdo, $appliedCoupon, $currentSubdomainId, (int)$user['id'], $userRole, (int)$plan['real_product_id'], (float)$vpOrderBdtBeforeCoupon);
+        if (!$cv['ok']) { echo json_encode(['status' => 'error', 'message' => '🎟️ ' . $cv['message']]); exit; }
+        $vpCouponApplied = $cv['coupon']; $vpCouponDisc = (float)$cv['discount_bdt'];
+        $totalCost = max(0.01, round(($vpOrderBdtBeforeCoupon - $vpCouponDisc) / max(1.0, $effectiveBdtRate), 4));
+        $unitPrice = $totalCost / max(1, $quantity);
     }
 
     $directMethod = '';
@@ -1947,6 +2038,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
             $pdo->prepare("INSERT INTO live_purchase_feed (subdomain_id, masked_username, product_name, amount_bdt) VALUES (?, ?, ?, ?)")
                 ->execute([$currentSubdomainId, maskUsername($user['username']), $productFullName, $bdtSpent]);
         } catch (Throwable $e) {}
+
+        if ($vpCouponApplied) vpRecordCouponUse($pdo, $vpCouponApplied, $currentSubdomainId, (int)$user['id'], (int)$plan['real_product_id'], $vpCouponDisc, (float)$vpOrderBdtBeforeCoupon);
 
         $pdo->commit();
 
@@ -5947,8 +6040,9 @@ document.addEventListener('DOMContentLoaded', function() {
         function openProductModal(productId) {
             const prod = allProductsCatalog[productId];
             if (!prod) return;
-            if (parseInt(prod.is_active) === 0) { showToast('This product is under maintenance!', 'error'); return; }
+            if (parseInt(prod.is_active) === 0 || parseInt(prod.is_maintenance || 0) === 1) { showToast('🔧 ' + (prod.maintenance_msg || 'This product is under maintenance!'), 'error'); return; }
             activeModalProduct = prod;
+            if (typeof clearModalCoupon === 'function') clearModalCoupon(true);
             document.getElementById('modalProdName').innerText = prod.name;
             document.getElementById('modalProdDesc').innerText = prod.description || 'Verified fast license delivery.';
             const thumb = document.getElementById('modalProdThumb');
@@ -6051,10 +6145,8 @@ document.addEventListener('DOMContentLoaded', function() {
         function updateStep1TotalCost() {
             if (!activeSelectedPlan) return;
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
-            let totalBdt = (activeSelectedPlan.price_bdt * qty);
-            if (appliedModalCoupon && appliedModalCoupon.final_price_bdt) {
-                totalBdt = appliedModalCoupon.final_price_bdt;
-            }
+            revalidateModalCoupon();
+            let totalBdt = getModalPayableBdt();
             // টোটাল পেবল প্রাইস সিলেক্ট করা কারেন্সিতে রেন্ডার হবে
             document.getElementById('step1TotalCostText').innerText = formatDisplayPrice(totalBdt);
         }
@@ -6085,7 +6177,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!isUserLoggedIn) { closeProductPurchaseModal(); openAuthModal('login'); showToast('Please login to buy!', 'error'); return; }
             if (!activeSelectedPlan) { showToast('Please select a valid plan!', 'error'); return; }
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
-            const totalCostBdt = activeSelectedPlan.price_bdt * qty;
+            const totalCostBdt = getModalPayableBdt();
             setCurrencyAmount('step2SummaryCost', totalCostBdt);
             const balStateTag = document.getElementById('balCardStateTag');
             if (userCurrentBalanceBdt >= totalCostBdt) { balStateTag.innerText = 'Instant Deduct'; balStateTag.className = 'text-[9px] text-[#00ff88] font-bold font-mono'; }
@@ -6110,7 +6202,7 @@ document.addEventListener('DOMContentLoaded', function() {
         function openBdtMethodsListScreen() {
             hideAllModalStepViews();
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
-            const totalCostBdt = activeSelectedPlan ? (activeSelectedPlan.price_bdt * qty) : 0;
+            const totalCostBdt = getModalPayableBdt();
             document.getElementById('bdtListTotalCostTag').innerText = `৳${totalCostBdt.toLocaleString()} BDT`;
             document.getElementById('modalViewBdtMethodsList').classList.remove('hidden');
         }
@@ -6120,7 +6212,7 @@ document.addEventListener('DOMContentLoaded', function() {
             activeBdtMethodObj = methodObj;
             hideAllModalStepViews();
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
-            const totalCostBdt = activeSelectedPlan ? (activeSelectedPlan.price_bdt * qty) : 0;
+            const totalCostBdt = getModalPayableBdt();
             const bannerImgEl = document.getElementById('bdtDedicatedBannerImg');
             bannerImgEl.src = methodObj.banner_url || globalPaymentBannerUrl || 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80';
             document.getElementById('bdtDedicatedTitle').innerText = `${methodObj.name}`;
@@ -6144,6 +6236,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const qty = document.getElementById('purchaseQtyInput').value;
             const formData = new FormData();
             formData.append('ajax_action', 'verify_and_deliver');
+            if (getModalCouponCode()) formData.append('coupon_code', getModalCouponCode());
             formData.append('plan_id', activeSelectedPlan.plan_id);
             formData.append('quantity', qty);
             formData.append('method_id', activeBdtMethodObj.id);
@@ -6179,7 +6272,7 @@ document.addEventListener('DOMContentLoaded', function() {
         function openDedicatedUsdtScreen() {
             hideAllModalStepViews();
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
-            const totalCostBdt = activeSelectedPlan ? (activeSelectedPlan.price_bdt * qty) : 0;
+            const totalCostBdt = getModalPayableBdt();
             const usdtEquivalent = totalCostBdt > 0 ? (totalCostBdt / currentMarketRate).toFixed(2) : '0.00';
             document.getElementById('usdtDedicatedPayableTag').innerText = `$${usdtEquivalent} USDT`;
             document.getElementById('usdtTrxIdInputOnly').value = '';
@@ -6195,12 +6288,13 @@ document.addEventListener('DOMContentLoaded', function() {
             btn.disabled = true;
             btn.innerHTML = '<i class="fa-solid fa-spinner fa-spin mr-1"></i> Processing...';
             const qty = document.getElementById('purchaseQtyInput').value;
-            const totalCostBdt = activeSelectedPlan.price_bdt * parseInt(qty);
+            const totalCostBdt = getModalPayableBdt();
             const formData = new FormData();
             formData.append('ajax_action', 'live_generate');
             formData.append('plan_id', activeSelectedPlan.plan_id);
             formData.append('quantity', qty);
             formData.append('payment_type', 'direct_deposit');
+            if (getModalCouponCode()) formData.append('coupon_code', getModalCouponCode());
             formData.append('direct_method', 'Binance');
             formData.append('direct_trx_id', trxId);
             formData.append('direct_amount', totalCostBdt);
@@ -6224,7 +6318,7 @@ document.addEventListener('DOMContentLoaded', function() {
         function openDedicatedBalanceScreen() {
             hideAllModalStepViews();
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
-            const totalCostBdt = activeSelectedPlan ? (activeSelectedPlan.price_bdt * qty) : 0;
+            const totalCostBdt = getModalPayableBdt();
             setCurrencyAmount('balDedicatedCostTag', totalCostBdt);
             setCurrencyAmount('balDeductCostText', totalCostBdt, { prefix: '-' });
             const remaining = userCurrentBalanceBdt - totalCostBdt;
@@ -6259,6 +6353,7 @@ document.addEventListener('DOMContentLoaded', function() {
             formData.append('plan_id', activeSelectedPlan.plan_id);
             formData.append('quantity', qty);
             formData.append('payment_type', 'balance');
+            if (getModalCouponCode()) formData.append('coupon_code', getModalCouponCode());
             try {
                 const res = await fetch('index.php', { method: 'POST', body: formData });
                 const data = await res.json();
@@ -6844,15 +6939,45 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         // --- COUPON APPLY LOGIC ---
-        async function applyModalCoupon() {
+        // ===================== 🎟️ COUPON (MODAL) =====================
+        function modalCouponKey() {
+            const qty = parseInt(document.getElementById('purchaseQtyInput')?.value) || 1;
+            return (activeSelectedPlan ? activeSelectedPlan.plan_id : 0) + 'x' + qty;
+        }
+        // বর্তমান প্ল্যান × পরিমাণ এর জন্য আসল পরিশোধযোগ্য অ্যামাউন্ট (কুপন থাকলে কুপন বাদ দিয়ে)
+        function getModalPayableBdt() {
+            if (!activeSelectedPlan) return 0;
+            const qty = parseInt(document.getElementById('purchaseQtyInput')?.value) || 1;
+            const base = activeSelectedPlan.price_bdt * qty;
+            if (appliedModalCoupon && appliedModalCoupon._key === modalCouponKey() && appliedModalCoupon.final_price_bdt) {
+                return parseFloat(appliedModalCoupon.final_price_bdt) || base;
+            }
+            return base;
+        }
+        function getModalCouponCode() {
+            return (appliedModalCoupon && appliedModalCoupon._key === modalCouponKey()) ? appliedModalCoupon.coupon_code : '';
+        }
+        function clearModalCoupon(clearInput) {
+            appliedModalCoupon = null;
+            const notice = document.getElementById('couponStatusNotice');
+            if (notice) { notice.classList.add('hidden'); notice.innerText = ''; }
+            if (clearInput && document.getElementById('modalCouponInput')) document.getElementById('modalCouponInput').value = '';
+        }
+        // প্ল্যান/পরিমাণ বদলালে কুপন আবার যাচাই হবে
+        function revalidateModalCoupon() {
+            if (appliedModalCoupon && appliedModalCoupon._key !== modalCouponKey()) applyModalCoupon(true);
+        }
+        async function applyModalCoupon(silent) {
             const input = document.getElementById('modalCouponInput');
             const notice = document.getElementById('couponStatusNotice');
-            const code = input.value.trim();
-            if (!code) { showToast('Please enter coupon code!', 'error'); return; }
+            const code = input.value.trim().toUpperCase();
+            if (!code) { if (!silent) showToast('Please enter coupon code!', 'error'); return; }
             if (!activeSelectedPlan || !activeModalProduct) return;
+            if (!isUserLoggedIn) { if (!silent) { showToast('Please login to use a coupon!', 'error'); openAuthModal('login'); } return; }
 
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
             const originalTotalBdt = (activeSelectedPlan.price_bdt * qty);
+            const key = modalCouponKey();
 
             const fd = new FormData();
             fd.append('ajax_action', 'apply_coupon');
@@ -6865,19 +6990,25 @@ document.addEventListener('DOMContentLoaded', function() {
                 const data = await res.json();
                 notice.classList.remove('hidden');
                 if (data.status === 'success') {
+                    data._key = key;
                     appliedModalCoupon = data;
-                    notice.className = "text-[10px] font-bold text-emerald-400 block pt-0.5";
-                    notice.innerText = `✅ Coupon Applied! Discount: ${formatDisplayPrice(parseFloat(String(data.discount_amount).replace(/[^0-9.]/g, '')) || 0)}`;
-                    document.getElementById('step1TotalCostText').innerText = formatDisplayPrice(data.final_price_bdt);
-                    showToast('Coupon discount applied!', 'success');
+                    notice.className = "text-[10px] font-bold text-emerald-400 block pt-0.5 leading-relaxed";
+                    let info = `✅ ${data.coupon_code} (${data.off_label || ''}) — You save ${formatDisplayPrice(parseFloat(data.discount_amount) || 0)}`;
+                    const extra = [];
+                    if (data.uses_left !== null && data.uses_left !== undefined) extra.push(`${data.uses_left} uses left`);
+                    if (data.expires_at) extra.push(`valid till ${data.expires_at}`);
+                    if (extra.length) info += `\n⏳ ${extra.join(' • ')}`;
+                    notice.innerText = info;
+                    if (!silent) showToast('Coupon discount applied!', 'success');
                 } else {
                     appliedModalCoupon = null;
                     notice.className = "text-[10px] font-bold text-rose-400 block pt-0.5";
                     notice.innerText = `❌ ${data.message}`;
-                    showToast(data.message, 'error');
+                    if (!silent) showToast(data.message, 'error');
                 }
+                if (typeof updateStep1TotalCost === 'function') updateStep1TotalCost();
             } catch(e) {
-                showToast('Coupon check failed!', 'error');
+                if (!silent) showToast('Coupon check failed!', 'error');
             }
         }
 
