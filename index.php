@@ -103,7 +103,14 @@ if (!function_exists('safeAddCol')) {
     }
 }
 
-try {
+// ⚡ SPEED: schema migrations (70+ CREATE/ALTER queries) now run only ONCE
+// after this file changes, instead of on every single page load.
+$__schemaFlagDir  = __DIR__ . '/uploads/';
+if (!is_dir($__schemaFlagDir)) @mkdir($__schemaFlagDir, 0755, true);
+$__schemaFlagFile = $__schemaFlagDir . '.schema_index_' . (int)@filemtime(__FILE__) . '.flag';
+$runSchemaMigrations = !is_file($__schemaFlagFile) || isset($_GET['run_migrations']);
+
+if ($runSchemaMigrations) try {
     $pdo->exec("CREATE TABLE IF NOT EXISTS `system_settings` (
         `setting_key` VARCHAR(100) PRIMARY KEY,
         `setting_value` TEXT NULL
@@ -344,6 +351,22 @@ try {
     if (!is_dir($avatarDir)) @mkdir($avatarDir, 0755, true);
     try { $pdo->exec("ALTER TABLE `users` MODIFY COLUMN `avatar_url` TEXT NULL"); } catch (Throwable $e) {}
 
+    // ⚡ SPEED: lookup indexes for the hottest storefront queries (added once, ignored if present)
+    $__speedIndexes = [
+        ['licenses', 'idx_vp_lic_sub_user', '`subdomain_id`, `user_id`'],
+        ['licenses', 'idx_vp_lic_sub_created', '`subdomain_id`, `created_at`'],
+        ['transactions', 'idx_vp_trx_user_sub', '`user_id`, `subdomain_id`'],
+        ['products', 'idx_vp_prod_sub', '`subdomain_id`, `is_active`'],
+        ['product_plans', 'idx_vp_plan_prod', '`product_id`'],
+        ['live_purchase_feed', 'idx_vp_feed_sub', '`subdomain_id`, `id`'],
+        ['system_notifications', 'idx_vp_notif_sub', '`subdomain_id`'],
+        ['banners', 'idx_vp_banner_sub', '`subdomain_id`'],
+    ];
+    foreach ($__speedIndexes as $__ix) {
+        try { $pdo->exec("ALTER TABLE `{$__ix[0]}` ADD INDEX `{$__ix[1]}` ({$__ix[2]})"); } catch (Throwable $e) {}
+    }
+
+    @file_put_contents($__schemaFlagFile, date('c'), LOCK_EX);
 } catch (Throwable $e) {}
 
 // Auto-seed Payment Methods if empty
@@ -362,8 +385,12 @@ try {
 
 // ====================================================================
 // 3B. UNIVERSAL PRODUCT & PLAN SYNC HEALER ENGINE
+// ⚡ SPEED: heavy UPDATE queries throttled to once every 2 minutes per store
 // ====================================================================
-try {
+$__healFlagFile = __DIR__ . '/uploads/.heal_' . (int)$currentSubdomainId . '.flag';
+$__runHealer    = $runSchemaMigrations || !is_file($__healFlagFile) || (time() - (int)@filemtime($__healFlagFile)) > 120;
+if ($__runHealer) { @touch($__healFlagFile); }
+if ($__runHealer) try {
     $pdo->exec("UPDATE products SET is_deleted = 0, is_active = 1, status = 'active' 
                 WHERE (subdomain_id = 0 OR subdomain_id IS NULL OR subdomain_id = '') 
                   AND (name IS NOT NULL AND TRIM(name) != '') 
@@ -2782,17 +2809,32 @@ if ($isFirebaseEnabled) {
     
     <title><?= htmlspecialchars($storeTitleName) ?> — Client Portal</title>
     
-    <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
-
-    <script src="https://cdn.tailwindcss.com"></script>
-    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js"></script>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    
+    <!-- ⚡ SPEED: preconnect to every CDN so DNS/TLS happen in parallel -->
+    <link rel="preconnect" href="https://cdn.tailwindcss.com">
+    <link rel="preconnect" href="https://cdnjs.cloudflare.com" crossorigin>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700;800&family=Orbitron:wght@700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <link rel="dns-prefetch" href="https://cdn.jsdelivr.net">
+
+    <script src="https://cdn.tailwindcss.com"></script>
+
+    <!-- ⚡ SPEED: non-critical scripts no longer block page rendering -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <?php if ($isFirebaseEnabled): ?>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js" defer></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js" defer></script>
+    <?php endif; ?>
+    <script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.9.3/dist/confetti.browser.min.js" defer></script>
+
+    <!-- ⚡ SPEED: icon + font stylesheets load without blocking first paint -->
+    <link rel="preload" as="style" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css" media="print" onload="this.media='all'">
+    <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700;800&family=Orbitron:wght@700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap">
+    <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700;800&family=Orbitron:wght@700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
+    <noscript>
+        <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+        <link href="https://fonts.googleapis.com/css2?family=Hind+Siliguri:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700;800&family=Orbitron:wght@700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    </noscript>
     
     <style>
         :root {
@@ -3298,7 +3340,7 @@ if ($isFirebaseEnabled) {
             <button onclick="document.getElementById('customPopup<?= (int)$popup['id'] ?>').classList.add('hidden')" 
                     class="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/10 text-gray-300 hover:text-white">✕</button>
             <?php if (!empty($popup['image_url'])): ?>
-                <img src="<?= htmlspecialchars($popup['image_url']) ?>" class="w-full rounded-xl mb-2">
+                <img loading="lazy" decoding="async" src="<?= htmlspecialchars($popup['image_url']) ?>" class="w-full rounded-xl mb-2">
             <?php endif; ?>
             <?php if (!empty($popup['title'])): ?>
                 <h3 class="text-base font-black text-white font-sans"><?= htmlspecialchars($popup['title']) ?></h3>
@@ -3434,13 +3476,13 @@ if ($isFirebaseEnabled) {
 
                 <!-- Dropdown Menu -->
                 <div id="currencyDropdownMenu" class="hidden absolute right-0 mt-2 w-28 bg-[#0c051a] border border-cyan-500/40 rounded-xl shadow-2xl z-50 overflow-hidden py-1">
-                    <button type="button" onclick="selectCurrencyOption('BDT', '🇧🇩', 'BDT')" class="w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
+                    <button type="button" onclick="selectCurrencyOption('BDT')" data-curr="BDT" class="currency-opt-btn w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
                         <span>🇧🇩</span> <span>BDT (৳)</span>
                     </button>
-                    <button type="button" onclick="selectCurrencyOption('USDT', '💲', 'USDT')" class="w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
+                    <button type="button" onclick="selectCurrencyOption('USDT')" data-curr="USDT" class="currency-opt-btn w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
                         <span>💲</span> <span>USDT ($)</span>
                     </button>
-                    <button type="button" onclick="selectCurrencyOption('INR', '🇮🇳', 'INR')" class="w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
+                    <button type="button" onclick="selectCurrencyOption('INR')" data-curr="INR" class="currency-opt-btn w-full text-left px-3 py-2 text-xs font-bold text-gray-300 hover:text-white hover:bg-cyan-500/20 flex items-center space-x-2 transition">
                         <span>🇮🇳</span> <span>INR (₹)</span>
                     </button>
                 </div>
@@ -3454,10 +3496,8 @@ if ($isFirebaseEnabled) {
                     </span>
                 </div>
 
-                <div onclick="<?= $canAddFund === 1 ? "goToPage('addfund')" : "showToast('Deposits are currently offline', 'error')" ?>" class="cursor-pointer flex items-center space-x-1 px-2.5 py-1.5 bg-[#0f061e] border <?= $canAddFund === 1 ? 'border-emerald-500/40 hover:border-emerald-400' : 'border-[#180c2a]' ?> rounded-xl shadow-sm transition" title="Your BDT Balance">
-                    <span class="text-xs font-black text-[#00ff88] font-mono leading-none">
-                        ৳<span id="liveHeaderBalance"><?= number_format($userBalanceBdt, 0) ?></span>
-                    </span>
+                <div onclick="<?= $canAddFund === 1 ? "goToPage('addfund')" : "showToast('Deposits are currently offline', 'error')" ?>" class="cursor-pointer flex items-center space-x-1 px-2.5 py-1.5 bg-[#0f061e] border <?= $canAddFund === 1 ? 'border-emerald-500/40 hover:border-emerald-400' : 'border-[#180c2a]' ?> rounded-xl shadow-sm transition" id="headerBalanceChip" title="Your BDT Balance">
+                    <span id="liveHeaderBalance" class="dynamic-price-el live-user-balance-el text-xs font-black text-[#00ff88] font-mono leading-none" data-bdt="<?= (float)$userBalanceBdt ?>" data-cur="short">৳<?= number_format($userBalanceBdt, 0) ?></span>
                     <?php if ($canAddFund === 1): ?>
                         <i class="fa-solid fa-plus text-[8px] text-emerald-400 font-bold ml-0.5"></i>
                     <?php endif; ?>
@@ -3522,7 +3562,7 @@ if ($isFirebaseEnabled) {
                     <?php foreach ($activeBanners as $idx => $bn): ?>
                         <div class="min-w-full h-40 sm:h-52 relative flex-shrink-0">
                             <a href="<?= htmlspecialchars($bn['target_link'] ?: '#') ?>" target="_blank" class="block w-full h-full">
-                                <img src="<?= htmlspecialchars($bn['image_url']) ?>" alt="Banner" class="w-full h-full object-cover">
+                                <img src="<?= htmlspecialchars($bn['image_url']) ?>" alt="Banner" class="w-full h-full object-cover" <?= $idx === 0 ? 'fetchpriority="high"' : 'loading="lazy"' ?> decoding="async">
                                 <div class="absolute inset-0 bg-gradient-to-t from-[#04010a] via-transparent to-transparent"></div>
                             </a>
                         </div>
@@ -3551,7 +3591,7 @@ if ($isFirebaseEnabled) {
                             <div class="story-avatar-ring">
                                 <div class="w-full h-full rounded-full overflow-hidden bg-black flex items-center justify-center">
                                     <?php if (!empty($avatarImg)): ?>
-                                        <img src="<?= htmlspecialchars($avatarImg) ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;">
+                                        <img loading="lazy" decoding="async" src="<?= htmlspecialchars($avatarImg) ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;">
                                     <?php else: ?>
                                         <i class="fa-solid fa-gamepad text-fuchsia-400 text-xs"></i>
                                     <?php endif; ?>
@@ -3616,7 +3656,7 @@ if ($isFirebaseEnabled) {
                                 <div class="flex items-center space-x-2">
                                     <div class="w-8 h-8 rounded-full bg-[#080312] border border-fuchsia-500/60 flex items-center justify-center text-fuchsia-400 font-bold overflow-hidden flex-shrink-0 shadow-sm">
                                         <?php if (!empty($prod['logo_url'])): ?>
-                                            <img src="<?= htmlspecialchars($prod['logo_url']) ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;">
+                                            <img loading="lazy" decoding="async" src="<?= htmlspecialchars($prod['logo_url']) ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;">
                                         <?php else: ?>
                                             <i class="fa-solid fa-gamepad text-[10px]"></i>
                                         <?php endif; ?>
@@ -3631,7 +3671,7 @@ if ($isFirebaseEnabled) {
 
                                 <div class="w-full h-28 sm:h-32 rounded-xl bg-[#06020c] border border-[#1b0c2c] overflow-hidden relative flex items-center justify-center shadow-inner">
                                     <?php if (!empty($bannerImg)): ?>
-                                        <img src="<?= htmlspecialchars($bannerImg) ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;">
+                                        <img loading="lazy" decoding="async" src="<?= htmlspecialchars($bannerImg) ?>" alt="" style="width: 100%; height: 100%; object-fit: cover;">
                                     <?php else: ?>
                                         <div class="w-full h-full bg-gradient-to-tr from-purple-950 to-fuchsia-950 flex items-center justify-center text-fuchsia-400 text-lg font-black">
                                             <i class="fa-solid fa-gem"></i>
@@ -3670,7 +3710,7 @@ if ($isFirebaseEnabled) {
                             <div class="pt-2 border-t border-[#180b26] flex items-center justify-between gap-1.5">
                                 <div class="price-badge-buy-style flex-col items-start !gap-0">
                                     <?php if ($hasDiscount && $minOriginalBDT > $minPriceBDT): ?>
-                                        <span class="text-[8px] text-white/70 line-through font-mono leading-none dynamic-price-el" data-bdt="<?= $minOriginalBDT ?>">
+                                        <span class="text-[8px] text-white/70 line-through font-mono leading-none dynamic-price-el" data-cur="short" data-bdt="<?= $minOriginalBDT ?>">
                                             ৳<?= number_format($minOriginalBDT, 0) ?>
                                         </span>
                                     <?php endif; ?>
@@ -3731,7 +3771,7 @@ if ($isFirebaseEnabled) {
                                 <div class="flex items-center space-x-3">
                                     <div class="b-avatar overflow-hidden">
                                         <?php if ($hasPhoto): ?>
-                                            <img src="<?= $tb['avatar_url'] ?>" class="w-full h-full object-cover rounded-full" alt="Avatar">
+                                            <img loading="lazy" decoding="async" src="<?= $tb['avatar_url'] ?>" class="w-full h-full object-cover rounded-full" alt="Avatar">
                                         <?php else: ?>
                                             <span><?= $letter ?></span>
                                         <?php endif; ?>
@@ -3750,7 +3790,7 @@ if ($isFirebaseEnabled) {
                                 </div>
                                 <div class="text-right">
                                     <strong class="text-sm sm:text-base font-black text-[#00ff88] font-mono">
-                                        <?= number_format($spentVal, 0) ?>৳
+                                        <span class="dynamic-price-el" data-bdt="<?= (float)$spentVal ?>" data-cur="short">৳<?= number_format($spentVal, 0) ?></span>
                                     </strong>
                                 </div>
                             </div>
@@ -3786,7 +3826,7 @@ if ($isFirebaseEnabled) {
                                 <div class="flex items-center space-x-3">
                                     <div class="b-avatar border-cyan-500/60 shadow-[0_0_10px_rgba(0,245,255,0.25)] overflow-hidden">
                                         <?php if ($hasPhoto): ?>
-                                            <img src="<?= $ro['avatar_url'] ?>" class="w-full h-full object-cover rounded-full" alt="Avatar">
+                                            <img loading="lazy" decoding="async" src="<?= $ro['avatar_url'] ?>" class="w-full h-full object-cover rounded-full" alt="Avatar">
                                         <?php else: ?>
                                             <span class="text-cyan-300"><?= $letter ?></span>
                                         <?php endif; ?>
@@ -3805,7 +3845,7 @@ if ($isFirebaseEnabled) {
                                 </div>
                                 <div class="text-right">
                                     <strong class="text-sm font-black text-cyan-400 font-mono">
-                                        <?= number_format($paidVal, 0) ?>৳
+                                        <span class="dynamic-price-el" data-bdt="<?= (float)$paidVal ?>" data-cur="short">৳<?= number_format($paidVal, 0) ?></span>
                                     </strong>
                                 </div>
                             </div>
@@ -4043,7 +4083,7 @@ if ($isFirebaseEnabled) {
                     <div class="grid grid-cols-2 gap-2 text-[10px]">
                         <div class="bg-[#070210] p-2.5 rounded-xl">
                             <span class="text-gray-400 font-sans">Total Deposits</span>
-                            <strong class="block text-emerald-400 text-sm mt-0.5 font-mono">৳<?= number_format(array_sum(array_map(fn($d)=> (float)$d['amount'], $deposits)) * $effectiveBdtRate, 0) ?></strong>
+                            <?php $__totalDepBdt = array_sum(array_map(fn($d)=> (float)$d['amount'], $deposits)) * $effectiveBdtRate; ?><strong class="block text-emerald-400 text-sm mt-0.5 font-mono dynamic-price-el" data-cur="short" data-bdt="<?= (float)$__totalDepBdt ?>">৳<?= number_format($__totalDepBdt, 0) ?></strong>
                         </div>
                         <div class="bg-[#070210] p-2.5 rounded-xl">
                             <span class="text-gray-400 font-sans">Keys Purchased</span>
@@ -4076,9 +4116,9 @@ if ($isFirebaseEnabled) {
                                 <div class="bg-[#070210] p-2.5 rounded-xl border border-[#180c2a] flex justify-between items-center text-xs shadow-inner">
                                     <div>
                                         <span class="font-bold text-white block text-[10px] font-sans">
-                                            <?= htmlspecialchars($d['method']) ?> • ৳<?= number_format((float)$d['amount'] * $effectiveBdtRate, 0) ?> BDT
+                                            <?= htmlspecialchars($d['method']) ?> • <span class="dynamic-price-el" data-bdt="<?= (float)$d['amount'] * $effectiveBdtRate ?>">৳<?= number_format((float)$d['amount'] * $effectiveBdtRate, 0) ?> BDT</span>
                                             <?php if ((float)($d['bonus_amount'] ?? 0) > 0): ?>
-                                                <span class="text-amber-400 font-mono font-bold">(+৳<?= number_format((float)$d['bonus_amount'], 0) ?> Bonus)</span>
+                                                <span class="text-amber-400 font-mono font-bold">(<span class="dynamic-price-el" data-cur="short" data-prefix="+" data-bdt="<?= (float)$d['bonus_amount'] ?>">+৳<?= number_format((float)$d['bonus_amount'], 0) ?></span> Bonus)</span>
                                             <?php endif; ?>
                                         </span>
                                         <span class="text-[8px] text-gray-400 font-mono">Trx: <?= htmlspecialchars($d['trx_id']) ?></span>
@@ -4157,8 +4197,8 @@ if ($isFirebaseEnabled) {
                             <?php foreach ($activeDepositBonuses as $bTier): ?>
                                 <div class="bg-[#0b0318]/90 border border-emerald-500/40 p-2 rounded-xl flex items-center justify-between shadow-inner">
                                     <div>
-                                        <span class="text-[9px] text-gray-400 font-mono block">Deposit ৳<?= number_format((float)$bTier['min_deposit'], 0) ?>+</span>
-                                        <strong class="text-xs font-black text-[#00ff88] font-mono">+৳<?= number_format((float)$bTier['bonus_amount'], 0) ?> Bonus</strong>
+                                        <span class="text-[9px] text-gray-400 font-mono block">Deposit <span class="dynamic-price-el" data-cur="short" data-bdt="<?= (float)$bTier['min_deposit'] ?>">৳<?= number_format((float)$bTier['min_deposit'], 0) ?></span>+</span>
+                                        <strong class="text-xs font-black text-[#00ff88] font-mono"><span class="dynamic-price-el" data-cur="short" data-prefix="+" data-bdt="<?= (float)$bTier['bonus_amount'] ?>">+৳<?= number_format((float)$bTier['bonus_amount'], 0) ?></span> Bonus</strong>
                                     </div>
                                     <span class="text-[7px] text-cyan-300 bg-cyan-950/60 px-1.5 py-0.5 rounded font-bold border border-cyan-500/30">
                                         <?= htmlspecialchars($bTier['title'] ?? 'Bonus') ?>
@@ -4183,7 +4223,7 @@ if ($isFirebaseEnabled) {
                                     <div class="flex items-center space-x-3">
                                         <div class="w-10 h-10 rounded-xl bg-purple-950/80 border border-fuchsia-500/40 flex items-center justify-center text-sm font-bold text-white overflow-hidden flex-shrink-0 shadow-sm">
                                             <?php if (!empty($pm['logo_url'])): ?>
-                                                <img src="<?= htmlspecialchars($pm['logo_url']) ?>" class="w-full h-full object-cover" alt="<?= htmlspecialchars($pm['name']) ?>">
+                                                <img loading="lazy" decoding="async" src="<?= htmlspecialchars($pm['logo_url']) ?>" class="w-full h-full object-cover" alt="<?= htmlspecialchars($pm['name']) ?>">
                                             <?php else: ?>
                                                 <i class="fa-solid fa-money-bill-wave text-fuchsia-400"></i>
                                             <?php endif; ?>
@@ -4233,7 +4273,7 @@ if ($isFirebaseEnabled) {
                     </div>
 
                     <div class="w-full h-28 sm:h-36 rounded-xl bg-[#090317] border border-fuchsia-500/40 overflow-hidden relative shadow-inner">
-                        <img id="addFundBannerImg" src="<?= htmlspecialchars(!empty($globalPaymentBanner) ? $globalPaymentBanner : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80') ?>" alt="Deposit Banner" class="w-full h-full object-cover">
+                        <img loading="lazy" decoding="async" id="addFundBannerImg" src="<?= htmlspecialchars(!empty($globalPaymentBanner) ? $globalPaymentBanner : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80') ?>" alt="Deposit Banner" class="w-full h-full object-cover">
                         <div class="absolute inset-0 bg-gradient-to-t from-[#04010a] via-transparent to-transparent"></div>
                         <span id="addFundBannerBadge" class="absolute bottom-1.5 left-2 px-2 py-0.5 rounded text-[8px] font-black uppercase bg-fuchsia-600/90 text-white font-mono shadow">
                             OFFICIAL DEPOSIT GATEWAY
@@ -4622,7 +4662,7 @@ if ($isFirebaseEnabled) {
                     </div>
                     <div class="text-right">
                         <span class="text-[8px] text-gray-400 block font-sans">Wallet Funds:</span>
-                        <strong class="text-cyan-300 font-bold text-xs">৳<?= number_format($userBalanceBdt, 0) ?> BDT</strong>
+                        <strong class="text-cyan-300 font-bold text-xs dynamic-price-el live-user-balance-el" data-bdt="<?= (float)$userBalanceBdt ?>">৳<?= number_format($userBalanceBdt, 0) ?> BDT</strong>
                         <span class="text-[8px] text-amber-400 block font-mono">Coins: 🪙 <?= number_format($userCoins) ?></span>
                     </div>
                 </div>
@@ -4693,7 +4733,7 @@ if ($isFirebaseEnabled) {
                             </span>
                             <div>
                                 <strong class="text-white block text-xs font-sans">Main Balance (Wallet)</strong>
-                                <span class="text-[9px] text-gray-400 font-mono">Balance: ৳<?= number_format($userBalanceBdt, 0) ?> BDT</span>
+                                <span class="text-[9px] text-gray-400 font-mono">Balance: <span class="dynamic-price-el live-user-balance-el" data-bdt="<?= (float)$userBalanceBdt ?>">৳<?= number_format($userBalanceBdt, 0) ?> BDT</span></span>
                             </div>
                         </div>
                         <div class="flex items-center space-x-1.5">
@@ -4740,7 +4780,7 @@ if ($isFirebaseEnabled) {
                             <div class="flex items-center space-x-2.5">
                                 <div class="w-8 h-8 rounded-xl bg-purple-950/80 border border-fuchsia-500/40 flex items-center justify-center text-xs font-bold text-white overflow-hidden flex-shrink-0">
                                     <?php if (!empty($pm['logo_url'])): ?>
-                                        <img src="<?= htmlspecialchars($pm['logo_url']) ?>" class="w-full h-full object-cover" alt="<?= htmlspecialchars($pm['name']) ?>">
+                                        <img loading="lazy" decoding="async" src="<?= htmlspecialchars($pm['logo_url']) ?>" class="w-full h-full object-cover" alt="<?= htmlspecialchars($pm['name']) ?>">
                                     <?php else: ?>
                                         <i class="fa-solid fa-money-bill-wave text-fuchsia-400"></i>
                                     <?php endif; ?>
@@ -4770,7 +4810,7 @@ if ($isFirebaseEnabled) {
                 </div>
 
                 <div id="bdtMethodBannerContainer" class="w-full h-24 sm:h-28 rounded-xl bg-[#090317] border border-fuchsia-500/40 overflow-hidden relative shadow-inner">
-                    <img id="bdtDedicatedBannerImg" src="<?= htmlspecialchars(!empty($globalPaymentBanner) ? $globalPaymentBanner : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80') ?>" alt="Payment Banner" class="w-full h-full object-cover">
+                    <img loading="lazy" decoding="async" id="bdtDedicatedBannerImg" src="<?= htmlspecialchars(!empty($globalPaymentBanner) ? $globalPaymentBanner : 'https://images.unsplash.com/photo-1618005182384-a83a8bd57fbe?w=800&q=80') ?>" alt="Payment Banner" class="w-full h-full object-cover">
                     <div class="absolute inset-0 bg-gradient-to-t from-[#04010a] via-transparent to-transparent"></div>
                     <span id="bdtDedicatedBannerBadge" class="absolute bottom-1.5 left-2 px-2 py-0.5 rounded text-[8px] font-black uppercase bg-fuchsia-600/90 text-white font-mono shadow">
                         OFFICIAL GATEWAY
@@ -4859,7 +4899,7 @@ if ($isFirebaseEnabled) {
                 <div class="bg-[#05010b] p-3 rounded-2xl border border-emerald-500/30 space-y-2 shadow-inner font-mono text-xs">
                     <div class="flex items-center justify-between">
                         <span class="text-gray-400 font-sans text-[11px]">Current Wallet Balance:</span>
-                        <strong class="text-white">৳<?= number_format($userBalanceBdt, 0) ?> BDT</strong>
+                        <strong class="text-white dynamic-price-el live-user-balance-el" data-bdt="<?= (float)$userBalanceBdt ?>">৳<?= number_format($userBalanceBdt, 0) ?> BDT</strong>
                     </div>
                     <div class="flex items-center justify-between">
                         <span class="text-gray-400 font-sans text-[11px]">Order Payable Cost:</span>
@@ -5119,11 +5159,11 @@ if ($isFirebaseEnabled) {
         const currentBdtRate           = <?= (float)$effectiveBdtRate ?>;
         const currentMarketRate        = <?= (float)$binanceMarketRate ?>;
         const currentInrRate           = <?= (float)$inrExchangeRate ?>;
-        let globalSelectedCurrency     = localStorage.getItem('site_currency') || 'BDT';
+        let globalSelectedCurrency     = (function(){ try { return localStorage.getItem('site_currency') || 'BDT'; } catch (e) { return 'BDT'; } })();
         let appliedModalCoupon         = null;
         const allUserResetKeys         = <?= json_encode($userAllResetKeys, JSON_UNESCAPED_UNICODE) ?>;
         const totalBannersCount        = <?= (int)count($activeBanners) ?>;
-        const userCurrentBalanceBdt    = <?= (float)$userBalanceBdt ?>;
+        let   userCurrentBalanceBdt    = <?= (float)$userBalanceBdt ?>;
         const userCurrentCoins         = <?= (int)$userCoins ?>;
         const isDepositSystemOnline    = <?= $canAddFund === 1 ? 'true' : 'false' ?>;
         const requestedInitialProdId   = <?= (int)$initialDeepLinkProdId ?>;
@@ -5228,7 +5268,7 @@ if ($isFirebaseEnabled) {
                                 <div class="b-member-card ${isHidden}">
                                     <div class="flex items-center space-x-3">
                                         <div class="b-avatar border-cyan-500/60 shadow-[0_0_10px_rgba(0,245,255,0.25)] overflow-hidden">
-                                            ${hasPhoto ? `<img src="${ro.avatar_url}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span class="text-cyan-300">${letter}</span>`}
+                                            ${hasPhoto ? `<img loading="lazy" src="${ro.avatar_url}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span class="text-cyan-300">${letter}</span>`}
                                             <div class="b-medal-badge bg-gradient-to-tr from-cyan-400 to-blue-500 text-slate-950 shadow-[0_0_8px_rgba(0,245,255,0.6)]">
                                                 <i class="fa-solid fa-bolt"></i>
                                             </div>
@@ -5244,7 +5284,7 @@ if ($isFirebaseEnabled) {
                                     </div>
                                     <div class="text-right">
                                         <strong class="text-sm font-black text-cyan-400 font-mono">
-                                            ${paidVal.toLocaleString()}৳
+                                            <span class="dynamic-price-el" data-bdt="${paidVal}" data-cur="short">${formatDisplayShort(paidVal)}</span>
                                         </strong>
                                     </div>
                                 </div>
@@ -5267,7 +5307,7 @@ if ($isFirebaseEnabled) {
                                 <div class="b-member-card ${isHidden}">
                                     <div class="flex items-center space-x-3">
                                         <div class="b-avatar overflow-hidden">
-                                            ${hasPhoto ? `<img src="${tb.avatar_url}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span>${letter}</span>`}
+                                            ${hasPhoto ? `<img loading="lazy" src="${tb.avatar_url}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span>${letter}</span>`}
                                             <div class="b-medal-badge">
                                                 <i class="fa-solid fa-medal"></i>
                                             </div>
@@ -5283,7 +5323,7 @@ if ($isFirebaseEnabled) {
                                     </div>
                                     <div class="text-right">
                                         <strong class="text-sm sm:text-base font-black text-[#00ff88] font-mono">
-                                            ${spentVal.toLocaleString()}৳
+                                            <span class="dynamic-price-el" data-bdt="${spentVal}" data-cur="short">${formatDisplayShort(spentVal)}</span>
                                         </strong>
                                     </div>
                                 </div>
@@ -5296,7 +5336,8 @@ if ($isFirebaseEnabled) {
         }
 
         // অটো-সিঙ্ক প্রতি ৭ সেকেন্ড পর পর ব্যাকগ্রাউন্ডে চেক করবে
-        setInterval(autoSyncLiveHistory, 7000);
+        // ⚡ SPEED: tab hidden থাকলে সার্ভারে রিকোয়েস্ট যাবে না
+        setInterval(() => { if (!document.hidden) autoSyncLiveHistory(); }, 7000);
 
         // ===================== PAYMENT RESULT POPUP =====================
         function showPaymentResultPopup(type, data) {
@@ -5318,10 +5359,10 @@ if ($isFirebaseEnabled) {
 
                 let bodyHtml = `<div class="flex items-center justify-between text-xs"><span class="text-gray-300">পরিমাণ:</span><strong class="text-white font-mono">৳${parseFloat(data.amount || 0).toLocaleString()} BDT</strong></div>`;
                 if (parseFloat(data.bonus || 0) > 0) {
-                    bodyHtml += `<div class="flex items-center justify-between text-xs"><span class="text-yellow-400 font-bold">বোনাস:</span><strong class="text-[#00ff88] font-mono">+৳${parseFloat(data.bonus).toLocaleString()} BDT</strong></div>`;
+                    bodyHtml += `<div class="flex items-center justify-between text-xs"><span class="text-yellow-400 font-bold">বোনাস:</span><strong class="text-[#00ff88] font-mono">+${formatDisplayPrice(parseFloat(data.bonus) || 0)}</strong></div>`;
                 }
                 if (data.remaining_balance) {
-                    bodyHtml += `<div class="flex items-center justify-between text-xs pt-1 border-t border-white/5"><span class="text-gray-400">ব্যালেন্স:</span><strong class="text-cyan-300 font-mono">৳${data.remaining_balance} BDT</strong></div>`;
+                    bodyHtml += `<div class="flex items-center justify-between text-xs pt-1 border-t border-white/5"><span class="text-gray-400">ব্যালেন্স:</span><strong class="text-cyan-300 font-mono">${formatDisplayPrice(parseFloat(String(data.remaining_balance).replace(/[^0-9.\-]/g, '')) || 0)}</strong></div>`;
                 }
                 bodyBox.className = "bg-[#0b0318] p-3.5 rounded-2xl border border-emerald-500/50 space-y-2 text-left font-bengali";
                 bodyBox.innerHTML = bodyHtml;
@@ -5576,14 +5617,18 @@ document.addEventListener('DOMContentLoaded', function() {
         function handleSplashDismissal() {
             const preloader = document.getElementById('siteSplashPreloader');
             if (preloader) {
+                // ⚡ SPEED: short splash only on the first visit of a session, instant afterwards
+                let seenSplash = false;
+                try { seenSplash = sessionStorage.getItem('splash_seen') === '1'; sessionStorage.setItem('splash_seen', '1'); } catch (e) {}
+                const holdMs = seenSplash ? 0 : 350;
                 setTimeout(() => {
                     preloader.classList.add('splash-fade-out');
                     setTimeout(() => {
                         preloader.style.display = 'none';
                         showInstallShopBanner();
                         checkFirstTimePromoOffer();
-                    }, 500);
-                }, 1300);
+                    }, seenSplash ? 0 : 250);
+                }, holdMs);
             } else {
                 showInstallShopBanner(); checkFirstTimePromoOffer();
             }
@@ -5726,7 +5771,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const res = await fetch('index.php', { method: 'POST', body: formData });
                 const data = await res.json();
                 if (data.status === 'success') {
-                    if (document.getElementById('liveHeaderBalance')) document.getElementById('liveHeaderBalance').innerText = data.remaining_balance;
+                    updateLiveBalance(data.remaining_balance);
                     showPaymentResultPopup('success', data);
                     document.getElementById('addFundAmountInput').value = '';
                     document.getElementById('addFundTrxIdInput').value = '';
@@ -5816,12 +5861,12 @@ document.addEventListener('DOMContentLoaded', function() {
             const infoCard = document.getElementById('planDetailsInfoCard');
             if (!plan) { infoCard.classList.add('hidden'); return; }
             infoCard.classList.remove('hidden');
-            document.getElementById('planCurrentPriceText').innerText = `৳${plan.price_bdt.toLocaleString()} BDT`;
+            setCurrencyAmount('planCurrentPriceText', plan.price_bdt);
             const discount = parseInt(plan.discount_percent || 0);
             const origStrike = document.getElementById('planOrigPriceStrike');
             const discountBadge = document.getElementById('planDiscountBadge');
             if (discount > 0 && plan.original_bdt > plan.price_bdt) {
-                origStrike.innerText = `৳${plan.original_bdt.toLocaleString()}`;
+                setCurrencyAmount(origStrike, plan.original_bdt, { short: true });
                 origStrike.classList.remove('hidden');
                 discountBadge.innerText = `${discount}% OFF`;
                 discountBadge.classList.remove('hidden');
@@ -5883,7 +5928,7 @@ document.addEventListener('DOMContentLoaded', function() {
             });
 
             if (activeSelectedPlan) {
-                document.getElementById('planCurrentPriceText').innerText = formatDisplayPrice(activeSelectedPlan.price_bdt);
+                setCurrencyAmount('planCurrentPriceText', activeSelectedPlan.price_bdt);
             }
         }
         function proceedToPaymentSelectScreen() {
@@ -5891,7 +5936,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (!activeSelectedPlan) { showToast('Please select a valid plan!', 'error'); return; }
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
             const totalCostBdt = activeSelectedPlan.price_bdt * qty;
-            document.getElementById('step2SummaryCost').innerText = `৳${totalCostBdt.toLocaleString()} BDT`;
+            setCurrencyAmount('step2SummaryCost', totalCostBdt);
             const balStateTag = document.getElementById('balCardStateTag');
             if (userCurrentBalanceBdt >= totalCostBdt) { balStateTag.innerText = 'Instant Deduct'; balStateTag.className = 'text-[9px] text-[#00ff88] font-bold font-mono'; }
             else { balStateTag.innerText = 'Low Balance'; balStateTag.className = 'text-[9px] text-rose-400 font-bold font-mono'; }
@@ -5961,7 +6006,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 clearTimeout(timeoutId);
                 const data = await res.json();
                 if (data.status === 'out_of_stock_refunded') {
-                    if (document.getElementById('liveHeaderBalance')) document.getElementById('liveHeaderBalance').innerText = data.remaining_balance;
+                    updateLiveBalance(data.remaining_balance);
                     closeProductPurchaseModal();
                     showPaymentResultPopup('success', { amount: data.amount || 0, bonus: 0, message: data.message });
                     return;
@@ -6013,7 +6058,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const res = await fetch('index.php', { method: 'POST', body: formData });
                 const data = await res.json();
                 if (data.status === 'out_of_stock_refunded') {
-                    if (document.getElementById('liveHeaderBalance')) document.getElementById('liveHeaderBalance').innerText = data.remaining_balance;
+                    updateLiveBalance(data.remaining_balance);
                     closeProductPurchaseModal();
                     showPaymentResultPopup('success', { amount: totalCostBdt, bonus: 0, message: data.message });
                     return;
@@ -6030,21 +6075,21 @@ document.addEventListener('DOMContentLoaded', function() {
             hideAllModalStepViews();
             const qty = parseInt(document.getElementById('purchaseQtyInput').value) || 1;
             const totalCostBdt = activeSelectedPlan ? (activeSelectedPlan.price_bdt * qty) : 0;
-            document.getElementById('balDedicatedCostTag').innerText = `৳${totalCostBdt.toLocaleString()} BDT`;
-            document.getElementById('balDeductCostText').innerText = `-৳${totalCostBdt.toLocaleString()} BDT`;
+            setCurrencyAmount('balDedicatedCostTag', totalCostBdt);
+            setCurrencyAmount('balDeductCostText', totalCostBdt, { prefix: '-' });
             const remaining = userCurrentBalanceBdt - totalCostBdt;
             const remEl = document.getElementById('balRemainingAfterText');
             const lowNotice = document.getElementById('balLowNoticeBoxDedicated');
             const confirmBtn = document.getElementById('btnConfirmBalDedicated');
             if (remaining >= 0) {
-                remEl.innerText = `৳${remaining.toLocaleString()} BDT`;
-                remEl.className = 'text-[#00ff88]';
+                setCurrencyAmount(remEl, remaining);
+                remEl.className = 'text-[#00ff88] dynamic-price-el';
                 lowNotice.classList.add('hidden');
                 confirmBtn.disabled = false;
                 confirmBtn.classList.remove('opacity-50', 'cursor-not-allowed');
             } else {
-                remEl.innerText = `Short by ৳${Math.abs(remaining).toLocaleString()} BDT`;
-                remEl.className = 'text-rose-400';
+                setCurrencyAmount(remEl, Math.abs(remaining), { prefix: 'Short by ' });
+                remEl.className = 'text-rose-400 dynamic-price-el';
                 lowNotice.classList.remove('hidden');
                 confirmBtn.disabled = true;
                 confirmBtn.classList.add('opacity-50', 'cursor-not-allowed');
@@ -6110,7 +6155,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
         function renderSuccessModalWithKeys(data) {
-            if (document.getElementById('liveHeaderBalance')) document.getElementById('liveHeaderBalance').innerText = data.remaining_balance;
+            updateLiveBalance(data.remaining_balance);
             if (document.getElementById('liveHeaderCoins')) document.getElementById('liveHeaderCoins').innerText = data.remaining_coins;
             document.getElementById('modalProductTitle').innerText = data.product_name;
             const coinNotifyBox = document.getElementById('modalRewardCoinNotify');
@@ -6454,7 +6499,7 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (!isUserLoggedIn) {
                         aiMsg.innerHTML = `🔒 <button onclick="openAuthModal('login'); toggleChatDialog();" class="text-cyan-400 font-bold underline">Login</button> to check balance!`;
                     } else {
-                        aiMsg.innerHTML = `💰 <b>Balances:</b><br>• <b>৳${userCurrentBalanceBdt.toLocaleString()} BDT</b><br>• <b>🪙 ${userCurrentCoins.toLocaleString()} Coins</b>`;
+                        aiMsg.innerHTML = `💰 <b>Balances:</b><br>• <b>${formatDisplayPrice(userCurrentBalanceBdt)}</b><br>• <b>🪙 ${userCurrentCoins.toLocaleString()} Coins</b>`;
                     }
                 } else if (q.includes('deposit') || q.includes('load') || q.includes('bkash')) {
                     if (!isUserLoggedIn) aiMsg.innerHTML = `🔒 <button onclick="openAuthModal('login'); toggleChatDialog();" class="text-cyan-400 font-bold underline">Login</button> to deposit!`;
@@ -6473,7 +6518,7 @@ document.addEventListener('DOMContentLoaded', function() {
                         let html = `🎯 <b>Found ${matches.length}:</b><div class="space-y-0.5 mt-0.5">`;
                         matches.slice(0, 2).forEach(p => {
                             const minP_BDT = p.plans.length > 0 ? p.plans[0].price_bdt : 0;
-                            html += `<div class="p-1 bg-[#090314] rounded border border-[#261345] flex justify-between items-center"><div><strong class="text-white text-[9px] block truncate">${p.name}</strong><span class="text-[8px] text-emerald-400">From ৳${minP_BDT.toLocaleString()}</span></div><button onclick="openProductModal(${p.id}); toggleChatDialog();" class="px-1.5 py-0.2 rounded btn-buy-compact text-white text-[8px] font-bold">Buy</button></div>`;
+                            html += `<div class="p-1 bg-[#090314] rounded border border-[#261345] flex justify-between items-center"><div><strong class="text-white text-[9px] block truncate">${p.name}</strong><span class="text-[8px] text-emerald-400">From ${formatDisplayShort(minP_BDT)}</span></div><button onclick="openProductModal(${p.id}); toggleChatDialog();" class="px-1.5 py-0.2 rounded btn-buy-compact text-white text-[8px] font-bold">Buy</button></div>`;
                         });
                         html += `</div>`;
                         aiMsg.innerHTML = html;
@@ -6506,71 +6551,113 @@ document.addEventListener('DOMContentLoaded', function() {
             showToast(`${label} copied!`, 'success');
         }
 
-        // --- MULTI-CURRENCY GLOBAL ENGINE (BDT | USDT | INR) ---
-        function setGlobalCurrency(curr) {
-            globalSelectedCurrency = curr;
-            localStorage.setItem('site_currency', curr);
-            
-            let flag = '🇧🇩';
-            if (curr === 'USDT' || curr === 'USD') flag = '💲';
-            if (curr === 'INR') flag = '🇮🇳';
-            if (document.getElementById('currFlagIcon')) document.getElementById('currFlagIcon').innerText = flag;
-            if (document.getElementById('currCodeLabel')) document.getElementById('currCodeLabel').innerText = curr;
-
-            showToast('Currency switched to ' + curr, 'success');
-            
-            // ১. হোমপেজের প্রোডাক্ট কার্ডের প্রাইস লাইভ আপডেট
-            document.querySelectorAll('.dynamic-price-el').forEach(el => {
-                const bdtVal = parseFloat(el.getAttribute('data-bdt')) || 0;
-                el.innerText = formatDisplayPrice(bdtVal);
-            });
-
-            // ২. হেডার ব্যালেন্স লাইভ আপডেট
-            const headerBalEl = document.getElementById('liveHeaderBalance');
-            if (headerBalEl && typeof userCurrentBalanceBdt !== 'undefined') {
-                headerBalEl.innerText = formatDisplayNumber(userCurrentBalanceBdt);
-            }
-
-            // ৩. প্রোফাইল পেজের ব্যালেন্স কার্ড লাইভ আপডেট
-            document.querySelectorAll('.profile-wallet-balance-el').forEach(el => {
-                const bdtVal = parseFloat(el.getAttribute('data-bdt')) || 0;
-                el.innerText = formatDisplayPrice(bdtVal);
-            });
-
-            // ৪. প্রোডাক্ট মোডাল খোলা থাকলে সেটার প্ল্যান ও টোটাল প্রাইসও আপডেট করা
-            if (typeof updateStep1TotalCost === 'function') {
-                updateStep1TotalCost();
-            }
-            if (typeof updateModalPlansDisplayCurrency === 'function') {
-                updateModalPlansDisplayCurrency();
-            }
+        // =====================================================================
+        // --- MULTI-CURRENCY GLOBAL ENGINE (BDT | USDT | INR) — SINGLE SOURCE ---
+        // সব দাম/ব্যালেন্স BDT তে রাখা থাকে (data-bdt), আর সিলেক্ট করা কারেন্সিতে দেখানো হয়।
+        // Rate: 1 USDT = currentBdtRate BDT, 1 USDT = currentInrRate INR (Mother / Sub admin থেকে সেট)
+        // =====================================================================
+        const CURRENCY_META = {
+            BDT:  { flag: '🇧🇩', symbol: '৳', code: 'BDT',  decimals: 0 },
+            USDT: { flag: '💲',  symbol: '$', code: 'USDT', decimals: 2 },
+            INR:  { flag: '🇮🇳', symbol: '₹', code: 'INR',  decimals: 0 }
+        };
+        function normalizeCurrency(curr) {
+            curr = String(curr || 'BDT').toUpperCase();
+            if (curr === 'USD') curr = 'USDT';
+            return CURRENCY_META[curr] ? curr : 'BDT';
         }
+        globalSelectedCurrency = normalizeCurrency(globalSelectedCurrency);
 
-        // নিখুঁত কারেন্সি ফরম্যাট (কোনো অতিরিক্ত ৳ বা ভুল চিহ্ন থাকবে না)
-        function formatDisplayPrice(bdtAmount) {
+        function convertFromBdt(bdtAmount, curr) {
             bdtAmount = parseFloat(bdtAmount) || 0;
-            if (globalSelectedCurrency === 'USDT' || globalSelectedCurrency === 'USD') {
-                const usdtVal = (bdtAmount / currentBdtRate).toFixed(2);
-                return `${usdtVal} USDT`;
-            } else if (globalSelectedCurrency === 'INR') {
-                const inr = Math.round((bdtAmount / currentBdtRate) * currentInrRate);
-                return `₹${inr.toLocaleString()} INR`;
-            } else {
-                return `৳${Math.round(bdtAmount).toLocaleString()} BDT`;
-            }
+            curr = curr || globalSelectedCurrency;
+            const bdtRate = currentBdtRate > 0 ? currentBdtRate : 1;
+            if (curr === 'USDT') return bdtAmount / bdtRate;
+            if (curr === 'INR')  return (bdtAmount / bdtRate) * currentInrRate;
+            return bdtAmount;
         }
-
-        // শুধু সংখ্যা বা অ্যামাউন্ট দেখানোর জন্য (টাকার চিহ্ন ছাড়া)
+        // শুধু সংখ্যা (চিহ্ন ছাড়া) — যেমন 1,250 / 10.00
         function formatDisplayNumber(bdtAmount) {
-            bdtAmount = parseFloat(bdtAmount) || 0;
-            if (globalSelectedCurrency === 'USDT' || globalSelectedCurrency === 'USD') {
-                return (bdtAmount / currentBdtRate).toFixed(2);
-            } else if (globalSelectedCurrency === 'INR') {
-                return Math.round((bdtAmount / currentBdtRate) * currentInrRate).toLocaleString();
-            } else {
-                return Math.round(bdtAmount).toLocaleString();
-            }
+            const meta = CURRENCY_META[globalSelectedCurrency];
+            const val = convertFromBdt(bdtAmount);
+            return val.toLocaleString('en-US', { minimumFractionDigits: meta.decimals, maximumFractionDigits: meta.decimals });
         }
+        // চিহ্ন + সংখ্যা — যেমন ৳1,250 / $10.00 / ₹880
+        function formatDisplayShort(bdtAmount) {
+            return CURRENCY_META[globalSelectedCurrency].symbol + formatDisplayNumber(bdtAmount);
+        }
+        // পুরো ফরম্যাট — যেমন ৳1,250 BDT / $10.00 USDT / ₹880 INR
+        function formatDisplayPrice(bdtAmount) {
+            return formatDisplayShort(bdtAmount) + ' ' + CURRENCY_META[globalSelectedCurrency].code;
+        }
+        // কোনো এলিমেন্টে BDT অ্যামাউন্ট বসানো (পরে কারেন্সি বদলালে অটো আপডেট হবে)
+        function setCurrencyAmount(elOrId, bdtAmount, opts) {
+            const el = (typeof elOrId === 'string') ? document.getElementById(elOrId) : elOrId;
+            if (!el) return;
+            opts = opts || {};
+            el.classList.add('dynamic-price-el');
+            el.setAttribute('data-bdt', parseFloat(bdtAmount) || 0);
+            if (opts.short) el.setAttribute('data-cur', 'short'); else el.removeAttribute('data-cur');
+            if (opts.prefix) el.setAttribute('data-prefix', opts.prefix); else el.removeAttribute('data-prefix');
+            renderCurrencyElement(el);
+        }
+        function renderCurrencyElement(el) {
+            const bdtVal = parseFloat(el.getAttribute('data-bdt')) || 0;
+            const prefix = el.getAttribute('data-prefix') || '';
+            const mode = el.getAttribute('data-cur');
+            const text = (mode === 'short') ? formatDisplayShort(bdtVal)
+                       : (mode === 'number') ? formatDisplayNumber(bdtVal)
+                       : formatDisplayPrice(bdtVal);
+            el.textContent = prefix + text;
+        }
+        function refreshAllCurrencyDisplays() {
+            document.querySelectorAll('.dynamic-price-el, .profile-wallet-balance-el, .plan-price-tag').forEach(renderCurrencyElement);
+            const meta = CURRENCY_META[globalSelectedCurrency];
+            const flagEl = document.getElementById('currFlagIcon');
+            const codeEl = document.getElementById('currCodeLabel');
+            if (flagEl) flagEl.textContent = meta.flag;
+            if (codeEl) codeEl.textContent = meta.code;
+            const balWrap = document.getElementById('headerBalanceChip');
+            if (balWrap) balWrap.title = 'Your ' + meta.code + ' Balance';
+            document.querySelectorAll('.currency-opt-btn').forEach(btn => {
+                btn.classList.toggle('bg-cyan-500/20', btn.getAttribute('data-curr') === globalSelectedCurrency);
+                btn.classList.toggle('text-white', btn.getAttribute('data-curr') === globalSelectedCurrency);
+            });
+            if (typeof updateStep1TotalCost === 'function') updateStep1TotalCost();
+        }
+        function setGlobalCurrency(curr, silent) {
+            globalSelectedCurrency = normalizeCurrency(curr);
+            try { localStorage.setItem('site_currency', globalSelectedCurrency); } catch (e) {}
+            refreshAllCurrencyDisplays();
+            if (!silent) showToast('Currency switched to ' + globalSelectedCurrency, 'success');
+        }
+        // সার্ভার থেকে আসা নতুন ব্যালেন্স ("1,250" BDT) — হেডার, প্রোফাইল, মোডাল সব জায়গায় আপডেট
+        function updateLiveBalance(remainingBdt) {
+            if (remainingBdt === undefined || remainingBdt === null || remainingBdt === '') return;
+            const val = parseFloat(String(remainingBdt).replace(/[^0-9.\-]/g, ''));
+            if (isNaN(val)) return;
+            userCurrentBalanceBdt = val;
+            document.querySelectorAll('.live-user-balance-el, #liveHeaderBalance, .profile-wallet-balance-el').forEach(el => {
+                el.setAttribute('data-bdt', val);
+                renderCurrencyElement(el);
+            });
+        }
+
+        // --- DROPDOWN TOGGLE ---
+        function toggleCurrencyDropdown(e) {
+            e.stopPropagation();
+            const menu = document.getElementById('currencyDropdownMenu');
+            if (menu) menu.classList.toggle('hidden');
+        }
+        // বাইরে ক্লিক করলে ড্রপডাউন বন্ধ হয়ে যাবে
+        window.addEventListener('click', () => {
+            document.getElementById('currencyDropdownMenu')?.classList.add('hidden');
+        });
+        function selectCurrencyOption(currCode) {
+            document.getElementById('currencyDropdownMenu')?.classList.add('hidden');
+            setGlobalCurrency(currCode);
+        }
+
         // --- COUPON APPLY LOGIC ---
         async function applyModalCoupon() {
             const input = document.getElementById('modalCouponInput');
@@ -6595,7 +6682,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (data.status === 'success') {
                     appliedModalCoupon = data;
                     notice.className = "text-[10px] font-bold text-emerald-400 block pt-0.5";
-                    notice.innerText = `✅ Coupon Applied! Discount: ৳${data.discount_amount} BDT`;
+                    notice.innerText = `✅ Coupon Applied! Discount: ${formatDisplayPrice(parseFloat(String(data.discount_amount).replace(/[^0-9.]/g, '')) || 0)}`;
                     document.getElementById('step1TotalCostText').innerText = formatDisplayPrice(data.final_price_bdt);
                     showToast('Coupon discount applied!', 'success');
                 } else {
@@ -6622,8 +6709,8 @@ document.addEventListener('DOMContentLoaded', function() {
             initFirebaseClientEngine();
             handleSplashDismissal();
             
-            // কারেন্সি সেটআপ ট্রিগার (পেজ খোলার সাথেই সিলেক্ট করা কারেন্সি দেখাবে)
-            setGlobalCurrency(globalSelectedCurrency);
+            // কারেন্সি সেটআপ ট্রিগার (পেজ খোলার সাথেই সিলেক্ট করা কারেন্সি দেখাবে, টোস্ট ছাড়া)
+            setGlobalCurrency(globalSelectedCurrency, true);
 
             if (requestedInitialProdId > 0 && allProductsCatalog[requestedInitialProdId]) {
                 openProductModal(requestedInitialProdId);
@@ -6635,76 +6722,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 showToast("<?= addslashes($toast['msg']) ?>", "<?= $toast['type'] ?>");
             <?php endif; ?>
         });
-        // --- DROPDOWN TOGGLE & CURRENCY ENGINE ---
-        function toggleCurrencyDropdown(e) {
-            e.stopPropagation();
-            const menu = document.getElementById('currencyDropdownMenu');
-            if (menu) menu.classList.toggle('hidden');
-        }
-
-        // বাইরে ক্লিক করলে ড্রপডাউন বন্ধ হয়ে যাবে
-        window.addEventListener('click', () => {
-            document.getElementById('currencyDropdownMenu')?.classList.add('hidden');
-        });
-
-        function selectCurrencyOption(currCode, flagEmoji, label) {
-            document.getElementById('currFlagIcon').innerText = flagEmoji;
-            document.getElementById('currCodeLabel').innerText = label;
-            document.getElementById('currencyDropdownMenu')?.classList.add('hidden');
-            setGlobalCurrency(currCode);
-        }
-
-        function setGlobalCurrency(curr) {
-            globalSelectedCurrency = curr;
-            localStorage.setItem('site_currency', curr);
-            
-            // ড্রপডাউন লেবেল ঠিক করা
-            let flag = '🇧🇩';
-            if (curr === 'USDT') flag = '💲';
-            if (curr === 'INR') flag = '🇮🇳';
-            if (document.getElementById('currFlagIcon')) document.getElementById('currFlagIcon').innerText = flag;
-            if (document.getElementById('currCodeLabel')) document.getElementById('currCodeLabel').innerText = curr;
-
-            showToast('Currency switched to ' + curr, 'success');
-            
-            // ১. প্রোডাক্ট কার্ডের দামগুলো আপডেট করা
-            document.querySelectorAll('.dynamic-price-el').forEach(el => {
-                const bdtVal = parseFloat(el.getAttribute('data-bdt')) || 0;
-                el.innerText = formatDisplayPrice(bdtVal);
-            });
-
-            // ২. ইউজারের প্রোফাইল ব্যালেন্স লাইভ আপডেট করা (যদি হেডার বা প্রোফাইলে থাকে)
-            const headerBalEl = document.getElementById('liveHeaderBalance');
-            if (headerBalEl && typeof userCurrentBalanceBdt !== 'undefined') {
-                headerBalEl.innerText = formatDisplayNumber(userCurrentBalanceBdt);
-            }
-
-            if (typeof updateStep1TotalCost === 'function') updateStep1TotalCost();
-        }
-
-        function formatDisplayPrice(bdtAmount) {
-            bdtAmount = parseFloat(bdtAmount) || 0;
-            if (globalSelectedCurrency === 'USDT' || globalSelectedCurrency === 'USD') {
-                const usdtVal = (bdtAmount / currentBdtRate).toFixed(2);
-                return `${usdtVal} USDT`;
-            } else if (globalSelectedCurrency === 'INR') {
-                const inr = Math.round((bdtAmount / currentBdtRate) * currentInrRate);
-                return `₹${inr.toLocaleString()} INR`;
-            } else {
-                return `৳${Math.round(bdtAmount).toLocaleString()} BDT`;
-            }
-        }
-
-        function formatDisplayNumber(bdtAmount) {
-            bdtAmount = parseFloat(bdtAmount) || 0;
-            if (globalSelectedCurrency === 'USDT' || globalSelectedCurrency === 'USD') {
-                return (bdtAmount / currentBdtRate).toFixed(2);
-            } else if (globalSelectedCurrency === 'INR') {
-                return Math.round((bdtAmount / currentBdtRate) * currentInrRate).toLocaleString();
-            } else {
-                return Math.round(bdtAmount).toLocaleString();
-            }
-        }
     </script>
 </body>
 </html>
