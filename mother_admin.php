@@ -5,7 +5,11 @@
  * VERSION: 14.0 (STRICT DOMAIN ISOLATION — MAIN DOMAIN ONLY)
  * ====================================================================
  */
-ini_set('display_errors', '1');
+// PHP notices/warnings আর প্যানেলের ভেতরে এলোমেলোভাবে প্রিন্ট হবে না — mother_admin_error.log এ জমা হবে।
+// (Fatal error হলে নিচের handler আগের মতোই স্ক্রিনে দেখাবে।)
+ini_set('display_errors', '0');
+ini_set('log_errors', '1');
+ini_set('error_log', __DIR__ . '/mother_admin_error.log');
 error_reporting(E_ALL);
 
 // --- ERROR LOGGER: writes mother_admin_error.log (same folder) + shows fatal errors on screen ---
@@ -56,7 +60,13 @@ function safeAddCol(PDO $pdo, string $table, string $column, string $type) {
 // ====================================================================
 // CORE DATABASE AUTO-MIGRATIONS & INDEX INTEGRITY
 // ====================================================================
-try {
+// ⚡ SPEED: migrations run only once after this file changes (not on every click)
+$__schemaFlagDir  = __DIR__ . '/uploads/';
+if (!is_dir($__schemaFlagDir)) @mkdir($__schemaFlagDir, 0755, true);
+$__schemaFlagFile = $__schemaFlagDir . '.schema_mother_' . (int)@filemtime(__FILE__) . '.flag';
+$runSchemaMigrations = !is_file($__schemaFlagFile) || isset($_GET['run_migrations']);
+
+if ($runSchemaMigrations) try {
     $pdo->exec("CREATE TABLE IF NOT EXISTS `products` (
       `id` INT AUTO_INCREMENT PRIMARY KEY,
       `subdomain_id` INT NOT NULL DEFAULT 0,
@@ -356,9 +366,12 @@ try {
       `is_active` TINYINT(1) DEFAULT 1
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
-    // ০% ডিসকাউন্ট ফিক্স: regular_price যদি ০ থাকে তা ঠিক করা
-    $pdo->exec("UPDATE product_plans SET regular_price = user_price WHERE (regular_price IS NULL OR regular_price <= 0) AND user_price > 0 AND subdomain_id = 0");
+    @file_put_contents($__schemaFlagFile, date('c'), LOCK_EX);
+} catch (Throwable $e) {}
 
+// ০% ডিসকাউন্ট ফিক্স: regular_price যদি ০ থাকে তা ঠিক করা (cheap, runs every request)
+try {
+    $pdo->exec("UPDATE product_plans SET regular_price = user_price WHERE (regular_price IS NULL OR regular_price <= 0) AND user_price > 0 AND subdomain_id = 0");
 } catch (Throwable $e) {}
 
 // Seed default payment methods if empty
@@ -383,6 +396,7 @@ $settings = [
     'loading_logo'                 => '',
     'main_site_theme_color'        => '#00f5ff',
     'usdt_rate'                    => '125',
+    'inr_rate'                     => '88',
     'binance_market_rate'          => '125',
     'bkash_number'                 => '01700000000',
     'nagad_number'                 => '01800000000',
@@ -433,6 +447,7 @@ try {
 } catch (Throwable $e) {}
 
 $effectiveBdtRate = max(1.0, (float)($settings['usdt_rate'] ?? 125.0));
+$effectiveInrRate = max(1.0, (float)($settings['inr_rate'] ?? 88.0));
 
 // --- LOAD NEW CONFIGURATIONS FOR MOTHER PANEL ---
 $botConfig = $pdo->query("SELECT * FROM telegram_bot_config WHERE subdomain_id = 0 LIMIT 1")->fetch(PDO::FETCH_ASSOC) ?: [
@@ -840,12 +855,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     }
 
     if ($act === 'update_usdt_rate_quick') {
-        $newRate = max(1.0, (float)($_POST['usdt_rate'] ?? 125));
-        $stmt = $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES ('usdt_rate', ?) ON DUPLICATE KEY UPDATE setting_value = ?");
-        $stmt->execute([$newRate, $newRate]);
+        // 1 USDT = X BDT  এবং  1 USDT = Y INR — এক জায়গা থেকেই সেট হয়
+        $newRate    = max(1.0, (float)($_POST['usdt_rate'] ?? 125));
+        $newInrRate = max(1.0, (float)($_POST['inr_rate'] ?? $effectiveInrRate));
+        $stmt = $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?");
+        $stmt->execute(['usdt_rate', (string)$newRate, (string)$newRate]);
+        $stmt->execute(['inr_rate', (string)$newInrRate, (string)$newInrRate]);
         $settings['usdt_rate'] = (string)$newRate;
+        $settings['inr_rate']  = (string)$newInrRate;
         $effectiveBdtRate = $newRate;
-        $toast = ['type' => 'success', 'msg' => "Dollar Rate: 1 USD = $newRate BDT"];
+        $effectiveInrRate = $newInrRate;
+        $toast = ['type' => 'success', 'msg' => "Rates saved: 1 USDT = ৳$newRate BDT | ₹$newInrRate INR"];
     }
 
     if ($act === 'update_site_theme_color') {
@@ -1750,14 +1770,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
 
     if ($act === 'update_gateway_rules') {
         $keys = [
-            'usdt_rate', 'binance_market_rate', 'binance_id', 'payment_banner_url',
+            'usdt_rate', 'inr_rate', 'binance_market_rate', 'binance_id', 'payment_banner_url',
             'deposit_system_status', 'min_deposit_limit', 'max_deposit_limit',
             'telegram_tutorial_link', 'auto_payment_on', 'snzpay_api_url', 'snzpay_license_key', 'snzpay_auto_verify'
         ];
 
         $stmt = $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?");
         foreach ($keys as $k) {
+            if (!array_key_exists($k, $_POST) && in_array($k, ['usdt_rate', 'inr_rate', 'binance_market_rate'], true)) continue;
             $val = trim($_POST[$k] ?? '0');
+            if (in_array($k, ['usdt_rate', 'inr_rate', 'binance_market_rate'], true)) $val = (string)max(1.0, (float)$val);
             $stmt->execute([$k, $val, $val]);
             $settings[$k] = $val;
         }
@@ -1775,6 +1797,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         }
 
         $effectiveBdtRate = max(1.0, (float)($settings['usdt_rate'] ?? 125.0));
+        $effectiveInrRate = max(1.0, (float)($settings['inr_rate'] ?? 88.0));
         $toast = ['type' => 'success', 'msg' => 'Main Domain gateway rules & settings saved successfully!'];
     }
 
@@ -1807,11 +1830,6 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         }
     }
 
-    if ($act === 'delete_deposit_bonus') {
-        $bonusId = (int)$_POST['bonus_id'];
-        $pdo->prepare("DELETE FROM deposit_bonuses WHERE id = ? AND subdomain_id = 0")->execute([$bonusId]);
-        $toast = ['type' => 'success', 'msg' => 'Deposit Reward tier deleted!'];
-    }
     if ($act === 'delete_deposit_bonus') {
         $bonusId = (int)$_POST['bonus_id'];
         $pdo->prepare("DELETE FROM deposit_bonuses WHERE id = ? AND subdomain_id = 0")->execute([$bonusId]);
@@ -2958,13 +2976,21 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                     </button>
                 </div>
 
-                <form method="POST" class="flex items-center space-x-2.5 bg-slate-900/90 px-3.5 py-2 rounded-xl border border-emerald-500/30 w-full sm:w-auto justify-between shadow-inner">
+                <!-- 💱 CURRENCY RATES: 1 USDT = ৳ BDT = ₹ INR (স্টোরফ্রন্টের সব কারেন্সি কনভার্শন এখান থেকে) -->
+                <form method="POST" class="flex flex-wrap items-center gap-2 bg-slate-900/90 px-3.5 py-2 rounded-xl border border-emerald-500/30 w-full sm:w-auto justify-between shadow-inner">
                     <input type="hidden" name="admin_action" value="update_usdt_rate_quick">
                     <input type="hidden" name="active_tab" value="tab-products">
-                    <span class="text-xs text-slate-400 font-bold font-mono">1 USD = ৳</span>
-                    <input type="number" step="0.5" name="usdt_rate" value="<?= $effectiveBdtRate ?>" required class="w-16 bg-transparent text-emerald-400 font-mono font-black text-sm outline-none text-center">
+                    <span class="text-xs text-slate-400 font-bold font-mono">1 USDT =</span>
+                    <label class="flex items-center gap-1 bg-slate-950/70 border border-emerald-500/30 rounded-lg px-2 py-1" title="BDT rate">
+                        <span class="text-xs text-emerald-400 font-black font-mono">৳</span>
+                        <input type="number" step="0.01" min="1" name="usdt_rate" value="<?= htmlspecialchars((string)$effectiveBdtRate) ?>" required class="w-16 bg-transparent text-emerald-400 font-mono font-black text-sm outline-none text-center">
+                    </label>
+                    <label class="flex items-center gap-1 bg-slate-950/70 border border-sky-500/30 rounded-lg px-2 py-1" title="INR rate">
+                        <span class="text-xs text-sky-400 font-black font-mono">₹</span>
+                        <input type="number" step="0.01" min="1" name="inr_rate" value="<?= htmlspecialchars((string)$effectiveInrRate) ?>" required class="w-16 bg-transparent text-sky-400 font-mono font-black text-sm outline-none text-center">
+                    </label>
                     <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-[11px] uppercase tracking-wider transition">
-                        SET RATE
+                        SET RATES
                     </button>
                 </form>
             </div>
@@ -4544,15 +4570,15 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                             </select>
                         </div>
 
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                             <div>
-                            <label class="text-emerald-400 block mb-1 font-bold">1 USD = BDT (Store Exchange Rate)</label>
-                            <input type="number" step="0.5" name="usdt_rate" value="<?= htmlspecialchars($settings['usdt_rate']) ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
-                        </div>
-                        <div>
-                            <label class="text-sky-400 block mb-1 font-bold">1 USD = INR (Rupee Exchange Rate)</label>
-                            <input type="number" step="0.5" name="inr_rate" value="<?= htmlspecialchars($settings['inr_rate'] ?? '88') ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
-                        </div>
+                                <label class="text-emerald-400 block mb-1 font-bold">1 USDT = ৳ BDT (Store Rate)</label>
+                                <input type="number" step="0.01" min="1" name="usdt_rate" value="<?= htmlspecialchars($settings['usdt_rate']) ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
+                            </div>
+                            <div>
+                                <label class="text-sky-400 block mb-1 font-bold">1 USDT = ₹ INR (Rupee Rate)</label>
+                                <input type="number" step="0.01" min="1" name="inr_rate" value="<?= htmlspecialchars($settings['inr_rate'] ?? '88') ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
+                            </div>
                             <div>
                                 <label class="text-yellow-400 block mb-1 font-bold">Binance Market Rate</label>
                                 <input type="number" step="0.5" name="binance_market_rate" value="<?= htmlspecialchars($settings['binance_market_rate'] ?? '125') ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">

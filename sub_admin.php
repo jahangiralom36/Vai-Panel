@@ -34,7 +34,13 @@ function safeAddCol(PDO $pdo, string $table, string $column, string $type) {
 // ====================================================================
 // CORE DATABASE AUTO-MIGRATIONS FOR ISOLATED TENANT
 // ====================================================================
-try {
+// ⚡ SPEED: migrations run only once after this file changes (not on every click)
+$__schemaFlagDir  = __DIR__ . '/uploads/';
+if (!is_dir($__schemaFlagDir)) @mkdir($__schemaFlagDir, 0755, true);
+$__schemaFlagFile = $__schemaFlagDir . '.schema_subadmin_' . (int)@filemtime(__FILE__) . '.flag';
+$runSchemaMigrations = !is_file($__schemaFlagFile) || isset($_GET['run_migrations']);
+
+if ($runSchemaMigrations) try {
     $pdo->exec("CREATE TABLE IF NOT EXISTS `subdomain_settings` (
       `subdomain_id` INT NOT NULL,
       `setting_key` VARCHAR(100) NOT NULL,
@@ -203,6 +209,7 @@ try {
           `is_active` TINYINT(1) DEFAULT 1
         ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
 
+        @file_put_contents($__schemaFlagFile, date('c'), LOCK_EX);
     } catch (Throwable $e) {}
 
 // ====================================================================
@@ -456,7 +463,19 @@ try {
     if (!empty($activeTenant['support_whatsapp'])) $settings['support_whatsapp'] = $activeTenant['support_whatsapp'];
 } catch (Throwable $e) {}
 
+// 💱 সাব-ডোমেইন নিজের রেট সেট না করলে মাদার প্যানেলের রেট (BDT / INR) ব্যবহার হবে
+try {
+    $stmtMotherRates = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('usdt_rate', 'inr_rate', 'binance_market_rate')");
+    $motherRates = $stmtMotherRates ? $stmtMotherRates->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+    foreach (['usdt_rate', 'inr_rate', 'binance_market_rate'] as $__rk) {
+        if ((!isset($tenantDbSettings[$__rk]) || (float)$tenantDbSettings[$__rk] <= 0) && !empty($motherRates[$__rk])) {
+            $settings[$__rk] = $motherRates[$__rk];
+        }
+    }
+} catch (Throwable $e) {}
+
 $effectiveBdtRate = max(1.0, (float)($settings['usdt_rate'] ?? 125.0));
+$effectiveInrRate = max(1.0, (float)($settings['inr_rate'] ?? 88.0));
 
 // --- LOAD ISOLATED SUBDOMAIN DATA ---
 $stmtB = $pdo->prepare("SELECT * FROM telegram_bot_config WHERE subdomain_id = ? LIMIT 1");
@@ -788,11 +807,16 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     }
 
     if ($act === 'update_usdt_rate_quick') {
-        $newRate = max(1.0, (float)($_POST['usdt_rate'] ?? 125));
+        // 1 USDT = X BDT  এবং  1 USDT = Y INR — এক জায়গা থেকেই সেট হয়
+        $newRate    = max(1.0, (float)($_POST['usdt_rate'] ?? 125));
+        $newInrRate = max(1.0, (float)($_POST['inr_rate'] ?? $effectiveInrRate));
         saveTenantSetting($pdo, $subadminTenantId, 'usdt_rate', (string)$newRate);
+        saveTenantSetting($pdo, $subadminTenantId, 'inr_rate', (string)$newInrRate);
         $settings['usdt_rate'] = (string)$newRate;
+        $settings['inr_rate']  = (string)$newInrRate;
         $effectiveBdtRate = $newRate;
-        $toast = ['type' => 'success', 'msg' => "Store Dollar Rate: 1 USD = $newRate BDT"];
+        $effectiveInrRate = $newInrRate;
+        $toast = ['type' => 'success', 'msg' => "Store Rates saved: 1 USDT = ৳$newRate BDT | ₹$newInrRate INR"];
     }
 
     if ($act === 'update_site_theme_color') {
@@ -1521,13 +1545,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
 
     if ($act === 'update_gateway_rules') {
         $keys = [
-            'usdt_rate', 'binance_market_rate', 'binance_id', 'payment_banner_url',
+            'usdt_rate', 'inr_rate', 'binance_market_rate', 'binance_id', 'payment_banner_url',
             'deposit_system_status', 'min_deposit_limit', 'max_deposit_limit',
             'telegram_tutorial_link', 'auto_payment_on', 'snzpay_api_url', 'snzpay_license_key', 'snzpay_auto_verify'
         ];
 
         foreach ($keys as $k) {
+            if (!array_key_exists($k, $_POST) && in_array($k, ['usdt_rate', 'inr_rate', 'binance_market_rate'], true)) continue;
             $val = trim($_POST[$k] ?? '0');
+            if (in_array($k, ['usdt_rate', 'inr_rate', 'binance_market_rate'], true)) $val = (string)max(1.0, (float)$val);
             saveTenantSetting($pdo, $subadminTenantId, $k, $val);
             $settings[$k] = $val;
         }
@@ -1546,6 +1572,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         }
 
         $effectiveBdtRate = max(1.0, (float)($settings['usdt_rate'] ?? 125.0));
+        $effectiveInrRate = max(1.0, (float)($settings['inr_rate'] ?? 88.0));
         $toast = ['type' => 'success', 'msg' => 'Store payment gateways & rules saved!'];
     }
 
@@ -2688,13 +2715,21 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                     </button>
                 </div>
 
-                <form method="POST" class="flex items-center space-x-2.5 bg-slate-900/90 px-3.5 py-2 rounded-xl border border-emerald-500/30 w-full sm:w-auto justify-between shadow-inner">
+                <!-- 💱 CURRENCY RATES: 1 USDT = ৳ BDT = ₹ INR (স্টোরফ্রন্টের সব কারেন্সি কনভার্শন এখান থেকে) -->
+                <form method="POST" class="flex flex-wrap items-center gap-2 bg-slate-900/90 px-3.5 py-2 rounded-xl border border-emerald-500/30 w-full sm:w-auto justify-between shadow-inner">
                     <input type="hidden" name="admin_action" value="update_usdt_rate_quick">
                     <input type="hidden" name="active_tab" value="tab-products">
-                    <span class="text-xs text-slate-400 font-bold font-mono">1 USD = ৳</span>
-                    <input type="number" step="0.5" name="usdt_rate" value="<?= $effectiveBdtRate ?>" required class="w-16 bg-transparent text-emerald-400 font-mono font-black text-sm outline-none text-center">
+                    <span class="text-xs text-slate-400 font-bold font-mono">1 USDT =</span>
+                    <label class="flex items-center gap-1 bg-slate-950/70 border border-emerald-500/30 rounded-lg px-2 py-1" title="BDT rate">
+                        <span class="text-xs text-emerald-400 font-black font-mono">৳</span>
+                        <input type="number" step="0.01" min="1" name="usdt_rate" value="<?= htmlspecialchars((string)$effectiveBdtRate) ?>" required class="w-16 bg-transparent text-emerald-400 font-mono font-black text-sm outline-none text-center">
+                    </label>
+                    <label class="flex items-center gap-1 bg-slate-950/70 border border-sky-500/30 rounded-lg px-2 py-1" title="INR rate">
+                        <span class="text-xs text-sky-400 font-black font-mono">₹</span>
+                        <input type="number" step="0.01" min="1" name="inr_rate" value="<?= htmlspecialchars((string)$effectiveInrRate) ?>" required class="w-16 bg-transparent text-sky-400 font-mono font-black text-sm outline-none text-center">
+                    </label>
                     <button type="submit" class="px-3 py-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 text-slate-950 font-black text-[11px] uppercase tracking-wider transition">
-                        SET RATE
+                        SET RATES
                     </button>
                 </form>
             </div>
@@ -4285,10 +4320,14 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                             </select>
                         </div>
 
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-3.5">
+                        <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
                             <div>
-                                <label class="text-emerald-400 block mb-1 font-bold">1 USD = BDT (Store Exchange Rate)</label>
-                                <input type="number" step="0.5" name="usdt_rate" value="<?= htmlspecialchars($settings['usdt_rate']) ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
+                                <label class="text-emerald-400 block mb-1 font-bold">1 USDT = ৳ BDT (Store Rate)</label>
+                                <input type="number" step="0.01" min="1" name="usdt_rate" value="<?= htmlspecialchars($settings['usdt_rate']) ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
+                            </div>
+                            <div>
+                                <label class="text-sky-400 block mb-1 font-bold">1 USDT = ₹ INR (Rupee Rate)</label>
+                                <input type="number" step="0.01" min="1" name="inr_rate" value="<?= htmlspecialchars($settings['inr_rate'] ?? '88') ?>" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-white outline-none font-bold">
                             </div>
                             <div>
                                 <label class="text-yellow-400 block mb-1 font-bold">Binance Market Rate</label>

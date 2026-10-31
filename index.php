@@ -479,6 +479,17 @@ if (!$tenant) {
         $tenantSettings = $stmtTS->fetchAll(PDO::FETCH_KEY_PAIR);
         if (!empty($tenantSettings)) $settings = array_merge($settings, $tenantSettings);
 
+        // 💱 সাব-ডোমেইন নিজের রেট সেট না করলে মাদার প্যানেলের রেট (BDT / INR) ব্যবহার হবে
+        try {
+            $stmtMotherRates = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('usdt_rate', 'inr_rate', 'binance_market_rate')");
+            $motherRates = $stmtMotherRates ? $stmtMotherRates->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+            foreach (['usdt_rate', 'inr_rate', 'binance_market_rate'] as $__rk) {
+                if ((!isset($tenantSettings[$__rk]) || (float)$tenantSettings[$__rk] <= 0) && !empty($motherRates[$__rk])) {
+                    $settings[$__rk] = $motherRates[$__rk];
+                }
+            }
+        } catch (Throwable $e) {}
+
         // Ensure tenant support telegram/whatsapp overrides from subdomains table
         if (!empty($tenant['support_telegram'])) $settings['support_telegram'] = $tenant['support_telegram'];
         if (!empty($tenant['support_whatsapp'])) $settings['support_whatsapp'] = $tenant['support_whatsapp'];
@@ -2265,6 +2276,45 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'spin_wheel') {
         'is_win'              => $isWin,
         'remaining_spins'     => max(0, $availableSpins - 1)
     ]);
+    exit;
+}
+
+// --- PROFILE PHOTO QUICK UPLOAD (AJAX) — আগে এই হ্যান্ডলার ছিল না, তাই ছবি সেভ হতো না ---
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && ($_POST['action'] ?? '') === 'update_avatar_only') {
+    while (ob_get_level()) { ob_end_clean(); }
+    header('Content-Type: application/json; charset=utf-8');
+    if (!$isLoggedIn) {
+        echo json_encode(['status' => 'error', 'message' => 'Please login first!']);
+        exit;
+    }
+    if (empty($_FILES['avatar_file']['name']) || $_FILES['avatar_file']['error'] !== UPLOAD_ERR_OK) {
+        echo json_encode(['status' => 'error', 'message' => 'No image received!']);
+        exit;
+    }
+    $ext = strtolower(pathinfo($_FILES['avatar_file']['name'], PATHINFO_EXTENSION));
+    $isImage = @getimagesize($_FILES['avatar_file']['tmp_name']) !== false;
+    if (!in_array($ext, ['jpg', 'jpeg', 'png', 'webp'], true) || !$isImage) {
+        echo json_encode(['status' => 'error', 'message' => 'Only JPG, PNG or WEBP images allowed!']);
+        exit;
+    }
+    if ((int)$_FILES['avatar_file']['size'] > 5 * 1024 * 1024) {
+        echo json_encode(['status' => 'error', 'message' => 'Image too large (max 5MB)!']);
+        exit;
+    }
+    $avatarDir = __DIR__ . '/uploads/avatars/';
+    if (!is_dir($avatarDir)) @mkdir($avatarDir, 0755, true);
+    $avatarFileName = 'avatar_' . (int)$user['id'] . '_' . time() . '.' . $ext;
+    if (!move_uploaded_file($_FILES['avatar_file']['tmp_name'], $avatarDir . $avatarFileName)) {
+        echo json_encode(['status' => 'error', 'message' => 'Upload failed on server!']);
+        exit;
+    }
+    $savedAvatarPath = 'uploads/avatars/' . $avatarFileName;
+    try {
+        $pdo->prepare("UPDATE users SET avatar_url = ? WHERE id = ? AND subdomain_id = ?")->execute([$savedAvatarPath, (int)$user['id'], $currentSubdomainId]);
+        echo json_encode(['status' => 'success', 'avatar_url' => $savedAvatarPath]);
+    } catch (Throwable $e) {
+        echo json_encode(['status' => 'error', 'message' => 'Could not save photo!']);
+    }
     exit;
 }
 
