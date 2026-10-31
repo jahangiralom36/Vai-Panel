@@ -345,6 +345,7 @@ if ($runSchemaMigrations) try {
 
     // ২. প্রোডাক্ট কাস্টম মেইনটেনেন্স মেসেজ কলাম
     safeAddCol($pdo, 'products', 'maintenance_msg', 'TEXT NULL');
+    safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
     
     // ৩. প্রোফাইল পিকচার ও অবতার ডিরেক্টরি নিশ্চিত করা
     $avatarDir = __DIR__ . '/uploads/avatars/';
@@ -394,7 +395,8 @@ if ($__runHealer) try {
     $pdo->exec("UPDATE products SET is_deleted = 0, is_active = 1, status = 'active' 
                 WHERE (subdomain_id = 0 OR subdomain_id IS NULL OR subdomain_id = '') 
                   AND (name IS NOT NULL AND TRIM(name) != '') 
-                  AND (status != 'inactive')");
+                  AND (status != 'inactive')
+                  AND (is_maintenance = 0 OR is_maintenance IS NULL)");
 
     $pdo->exec("UPDATE product_plans SET is_deleted = 0, is_active = 1 
                 WHERE (subdomain_id = 0 OR subdomain_id IS NULL OR subdomain_id = '')");
@@ -403,7 +405,8 @@ if ($__runHealer) try {
         $pdo->prepare("UPDATE products SET is_deleted = 0, is_active = 1, status = 'active' 
                        WHERE subdomain_id = ? 
                          AND (name IS NOT NULL AND TRIM(name) != '') 
-                         AND (status != 'inactive')")->execute([$currentSubdomainId]);
+                         AND (status != 'inactive')
+                         AND (is_maintenance = 0 OR is_maintenance IS NULL)")->execute([$currentSubdomainId]);
 
         $pdo->prepare("UPDATE product_plans pl 
                        JOIN products p ON pl.product_id = p.id 
@@ -2522,7 +2525,7 @@ $discoveredFromProducts = [];
 try {
     if ($tenant) {
         $sql = "SELECT p.id as product_id, p.name as product_name, p.image_url, p.logo_url, p.banner_url, 
-                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, 
+                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, p.is_maintenance, p.maintenance_msg, 
                        p.app_download_url,
                        pl.id as plan_id, 
                        COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as validity, 
@@ -2533,7 +2536,7 @@ try {
                 LEFT JOIN product_plans pl ON pl.product_id = p.id 
                      AND (pl.is_deleted = 0 OR pl.is_deleted IS NULL)
                 WHERE p.subdomain_id = ?
-                  AND (p.is_active = 1 OR p.is_active IS NULL OR p.is_active = '1' OR p.is_active = 'active' OR p.is_active = '' OR p.status = 'active' OR p.status IS NULL) 
+                  AND (p.is_active = 1 OR p.is_active IS NULL OR p.is_active = '1' OR p.is_active = 'active' OR p.is_active = '' OR p.status = 'active' OR p.status IS NULL OR p.is_maintenance = 1) 
                   AND (p.is_deleted = 0 OR p.is_deleted IS NULL OR p.is_deleted = '0')
                   AND (p.status != 'deleted' OR p.status IS NULL)
                 ORDER BY p.is_pinned DESC, p.sort_order ASC, p.id ASC, pl.user_price ASC, pl.price ASC, pl.id ASC";
@@ -2541,7 +2544,7 @@ try {
         $stmtProds->execute([$currentSubdomainId]);
     } else {
         $sql = "SELECT p.id as product_id, p.name as product_name, p.image_url, p.logo_url, p.banner_url, 
-                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, 
+                       p.download_link, p.setup_link, p.description, p.tags, p.category, p.is_pinned, p.is_active, p.is_maintenance, p.maintenance_msg, 
                        p.app_download_url,
                        pl.id as plan_id, 
                        COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as validity, 
@@ -2552,7 +2555,7 @@ try {
                 LEFT JOIN product_plans pl ON pl.product_id = p.id 
                      AND (pl.is_deleted = 0 OR pl.is_deleted IS NULL)
                 WHERE (p.subdomain_id = 0 OR p.subdomain_id IS NULL OR p.subdomain_id = '' OR p.subdomain_id = '0')
-                  AND (p.is_active = 1 OR p.is_active IS NULL OR p.is_active = '1' OR p.is_active = 'active' OR p.is_active = '' OR p.status = 'active' OR p.status IS NULL)
+                  AND (p.is_active = 1 OR p.is_active IS NULL OR p.is_active = '1' OR p.is_active = 'active' OR p.is_active = '' OR p.status = 'active' OR p.status IS NULL OR p.is_maintenance = 1)
                   AND (p.is_deleted = 0 OR p.is_deleted IS NULL OR p.is_deleted = '0')
                   AND (p.status != 'deleted' OR p.status IS NULL)
                 ORDER BY p.is_pinned DESC, p.sort_order ASC, p.id ASC, pl.user_price ASC, pl.price ASC, pl.id ASC";
@@ -2658,6 +2661,8 @@ try {
                 'category'         => $rawCat,
                 'is_pinned'        => (int)($dp['is_pinned'] ?? 0),
                 'is_active'        => $prodActiveStatus,
+                'is_maintenance'   => (int)($dp['is_maintenance'] ?? 0),
+                'maintenance_msg'  => trim((string)($dp['maintenance_msg'] ?? '')),
                 'logo_url'         => $logo,
                 'banner_url'       => $banner,
                 'description'      => $desc,
@@ -3130,8 +3135,16 @@ if ($isFirebaseEnabled) {
             z-index: 50; overflow: hidden;
         }
 
+        .product-card.product-card-maint {
+            background: linear-gradient(180deg, #2a0710 0%, #12030a 100%) !important;
+            border: 1.5px solid #f43f5e !important;
+            box-shadow: 0 0 14px rgba(244, 63, 94, 0.45), inset 0 0 18px rgba(244, 63, 94, 0.12) !important;
+        }
+        .product-card.product-card-maint:hover { transform: none; }
+        .maint-icon-pulse { animation: maintPulse 1.4s ease-in-out infinite; }
+        @keyframes maintPulse { 0%,100% { opacity: 1; } 50% { opacity: .45; } }
         .maint-overlay {
-            position: absolute; inset: 0; background: rgba(4, 1, 10, 0.88); backdrop-filter: blur(4px);
+            position: absolute; inset: 0; background: rgba(40, 4, 14, 0.82); backdrop-filter: blur(3px);
             z-index: 20; display: flex; flex-direction: column; align-items: center; justify-content: center; border-radius: 20px;
         }
         .maint-watermark-text { color: #f43f5e; font-weight: 900; font-size: 13px; letter-spacing: 2px; }
@@ -3320,6 +3333,26 @@ if ($isFirebaseEnabled) {
             border: 2px solid #d946ef;
             box-shadow: 0 0 60px rgba(217, 70, 239, 0.5);
         }
+
+        /* ===== HEADER COLOR SYSTEM ===== */
+        .hdr-store-name { color: #ffffff; text-shadow: 0 0 4px rgba(255,255,255,.55), 0 0 10px rgba(0,245,255,.45), 0 0 18px rgba(217,70,239,.30); }
+        .hdr-portal-label { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.55); }
+        .hdr-chip { box-shadow: 0 1px 2px rgba(0,0,0,.4); white-space: nowrap; }
+        .hdr-currency-chip { background: #071026; border: 1.5px solid #3b82f6; color: #ffffff; }
+        .hdr-currency-chip:hover { border-color: #60a5fa; box-shadow: 0 0 8px rgba(59,130,246,.45); }
+        .hdr-coin-chip { background: #171003; border: 1.5px solid #fbbf24; color: #facc15; }
+        .hdr-coin-chip i, .hdr-coin-chip span { color: #facc15; text-shadow: 0 0 6px rgba(250,204,21,.45); }
+        .hdr-balance-chip { background: #03140b; border: 1.5px solid #00ff88; }
+        .hdr-balance-chip span, .hdr-balance-chip i { color: #00ff88; text-shadow: 0 0 6px rgba(0,255,136,.55); }
+        .hdr-balance-chip:hover { box-shadow: 0 0 10px rgba(0,255,136,.35); }
+        .hdr-bell-chip { background: #0f061e; border: 1.5px solid #a855f7; color: #22d3ee; }
+        .hdr-bell-chip i { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.6); }
+        .hdr-bell-chip:hover { box-shadow: 0 0 10px rgba(168,85,247,.45); }
+        @media (max-width: 380px) {
+            .hdr-chip { padding-left: 6px !important; padding-right: 6px !important; }
+            .hdr-currency-chip #currFlagIcon { display: none; }
+            .hdr-store-name { max-width: 84px !important; }
+        }
     </style>
 </head>
 <body class="min-h-screen w-full flex flex-col justify-between relative pb-24">
@@ -3506,22 +3539,22 @@ if ($isFirebaseEnabled) {
                 <?php endif; ?>
             </div>
             <div>
-                <h1 class="text-xs sm:text-sm font-black text-white tracking-wider leading-none uppercase font-sans truncate max-w-[120px] sm:max-w-none">
+                <h1 class="hdr-store-name text-xs sm:text-sm font-black tracking-wider leading-none uppercase font-sans truncate max-w-[110px] sm:max-w-none">
                     <?= htmlspecialchars($storeTitleName) ?>
                 </h1>
-                <span class="text-[8px] sm:text-[9px] text-cyan-400 font-bold uppercase tracking-widest block mt-0.5">
+                <span class="hdr-portal-label text-[8px] sm:text-[9px] font-bold uppercase tracking-widest block mt-0.5">
                     <?= $isLoggedIn ? strtoupper($userRole) . ' PORTAL' : 'OFFICIAL STORE' ?>
                 </span>
             </div>
         </div>
 
-        <div class="flex items-center space-x-1.5">
+        <div class="flex items-center gap-1 sm:gap-1.5 flex-shrink-0">
             <!-- 🇧🇩 💲 🇮🇳 CUSTOM DROPDOWN CURRENCY SELECTOR -->
             <div class="relative font-mono">
-                <button type="button" onclick="toggleCurrencyDropdown(event)" id="currentCurrencyBtn" class="flex items-center space-x-1.5 bg-[#0d051c] border border-cyan-500/50 hover:border-cyan-400 px-2.5 py-1.5 rounded-xl text-xs font-bold text-white shadow-sm transition active:scale-95">
+                <button type="button" onclick="toggleCurrencyDropdown(event)" id="currentCurrencyBtn" class="hdr-chip hdr-currency-chip flex items-center space-x-1 px-2 py-1.5 rounded-xl text-xs font-bold transition active:scale-95">
                     <span id="currFlagIcon">🇧🇩</span>
                     <span id="currCodeLabel">BDT</span>
-                    <i class="fa-solid fa-chevron-down text-[9px] text-cyan-400 ml-0.5"></i>
+                    <i class="fa-solid fa-chevron-down text-[9px] ml-0.5" style="color:#60a5fa"></i>
                 </button>
 
                 <!-- Dropdown Menu -->
@@ -3539,21 +3572,21 @@ if ($isFirebaseEnabled) {
             </div>
 
             <?php if ($isLoggedIn): ?>
-                <div class="flex items-center space-x-1 px-2.5 py-1.5 bg-[#140b02] border border-amber-500/50 rounded-xl shadow-sm" title="Your Reward Coins">
-                    <i class="fa-solid fa-coins text-[11px] text-amber-400 animate-pulse"></i>
-                    <span id="liveHeaderCoins" class="text-xs font-black text-amber-300 font-mono leading-none">
+                <div class="hdr-chip hdr-coin-chip flex items-center space-x-1 px-2 py-1.5 rounded-xl" title="Your Reward Coins">
+                    <i class="fa-solid fa-coins text-[11px]"></i>
+                    <span id="liveHeaderCoins" class="text-xs font-black font-mono leading-none">
                         <?= number_format($userCoins) ?>
                     </span>
                 </div>
 
-                <div onclick="<?= $canAddFund === 1 ? "goToPage('addfund')" : "showToast('Deposits are currently offline', 'error')" ?>" class="cursor-pointer flex items-center space-x-1 px-2.5 py-1.5 bg-[#0f061e] border <?= $canAddFund === 1 ? 'border-emerald-500/40 hover:border-emerald-400' : 'border-[#180c2a]' ?> rounded-xl shadow-sm transition" id="headerBalanceChip" title="Your BDT Balance">
-                    <span id="liveHeaderBalance" class="dynamic-price-el live-user-balance-el text-xs font-black text-[#00ff88] font-mono leading-none" data-bdt="<?= (float)$userBalanceBdt ?>" data-cur="short">৳<?= number_format($userBalanceBdt, 0) ?></span>
+                <div onclick="<?= $canAddFund === 1 ? "goToPage('addfund')" : "showToast('Deposits are currently offline', 'error')" ?>" class="hdr-chip hdr-balance-chip cursor-pointer flex items-center space-x-1 px-2 py-1.5 rounded-xl transition" id="headerBalanceChip" title="Your BDT Balance">
+                    <span id="liveHeaderBalance" class="dynamic-price-el live-user-balance-el text-xs font-black font-mono leading-none" data-bdt="<?= (float)$userBalanceBdt ?>" data-cur="short">৳<?= number_format($userBalanceBdt, 0) ?></span>
                     <?php if ($canAddFund === 1): ?>
-                        <i class="fa-solid fa-plus text-[8px] text-emerald-400 font-bold ml-0.5"></i>
+                        <i class="fa-solid fa-plus text-[8px] font-bold ml-0.5"></i>
                     <?php endif; ?>
                 </div>
 
-                <button type="button" onclick="openNotificationsModal()" class="relative w-8 h-8 rounded-xl bg-[#0f061e] border border-cyan-500/40 flex items-center justify-center text-cyan-300 hover:border-cyan-400 active:scale-95 transition shadow-sm" aria-label="Notifications">
+                <button type="button" onclick="openNotificationsModal()" class="hdr-chip hdr-bell-chip relative w-8 h-8 rounded-xl flex items-center justify-center active:scale-95 transition flex-shrink-0" aria-label="Notifications">
                     <i class="fa-solid fa-bell text-xs"></i>
                     <?php if ($notifCount > 0): ?>
                         <span class="absolute -top-1 -right-1 w-4 h-4 rounded-full bg-rose-500 text-white font-mono font-bold text-[8px] flex items-center justify-center shadow-[0_0_8px_#f43f5e] animate-pulse">
@@ -3683,15 +3716,16 @@ if ($isFirebaseEnabled) {
                         $minCoinPrice   = !empty($coinPricesList) ? min($coinPricesList) : 0;
 
                         $bannerImg      = !empty($prod['banner_url']) ? $prod['banner_url'] : $prod['logo_url'];
-                        $isProdMaint    = (int)($prod['is_active'] ?? 1) === 0;
+                        $isProdMaint    = (int)($prod['is_active'] ?? 1) === 0 || (int)($prod['is_maintenance'] ?? 0) === 1;
                         $hasDiscount    = (int)($prod['max_discount'] ?? 0) > 0;
                     ?>
-                        <div class="product-card p-3 sm:p-3.5 cursor-pointer prod-item-box space-y-2.5"
+                        <div class="product-card <?= $isProdMaint ? 'product-card-maint' : '' ?> p-3 sm:p-3.5 cursor-pointer prod-item-box space-y-2.5"
                              data-category="<?= $prod['category'] ?>"
-                             onclick="<?= $isProdMaint ? "showToast('This product is under maintenance', 'error')" : "openProductModal({$prod['id']})" ?>">
+                             onclick="<?= $isProdMaint ? htmlspecialchars("showToast(" . json_encode('🔧 ' . (($prod['maintenance_msg'] ?? '') ?: 'This product is under maintenance')) . ", 'error')", ENT_QUOTES) : "openProductModal({$prod['id']})" ?>">
                             
                             <?php if ($isProdMaint): ?>
                                 <div class="maint-overlay p-2 text-center">
+                                    <i class="fa-solid fa-screwdriver-wrench text-rose-400 text-lg mb-1 maint-icon-pulse"></i>
                                     <div class="maint-watermark-text font-mono text-[11px] text-rose-400">MAINTENANCE</div>
                                     <?php if (!empty($prod['maintenance_msg'])): ?>
                                         <p class="text-[9px] text-amber-300 font-sans font-bold mt-1 px-1 line-clamp-2 leading-tight">

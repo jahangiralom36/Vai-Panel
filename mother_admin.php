@@ -125,6 +125,8 @@ if ($runSchemaMigrations) try {
     safeAddCol($pdo, 'product_plans', 'regular_price', 'DECIMAL(10,2) DEFAULT 0.00');
     safeAddCol($pdo, 'product_plans', 'discount_percent', 'DECIMAL(5,2) DEFAULT 0.00');
     safeAddCol($pdo, 'product_plans', 'reseller_discount_percent', 'DECIMAL(5,2) DEFAULT 0.00');
+    safeAddCol($pdo, 'products', 'maintenance_msg', 'TEXT NULL');
+    safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
     safeAddCol($pdo, 'product_plans', 'reward_coins', 'INT DEFAULT 0');
     safeAddCol($pdo, 'product_plans', 'coin_price', 'INT DEFAULT 0');
 
@@ -1102,6 +1104,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         }
     }
 
+
+    // 🔧 QUICK PRODUCT MAINTENANCE TOGGLE (প্রোডাক্ট লিস্ট থেকে এক ক্লিকে)
+    if ($act === 'toggle_product_maintenance') {
+        $prodId   = (int)($_POST['product_id'] ?? 0);
+        $turnOn   = ($_POST['maint_state'] ?? '') === '1';
+        $maintMsg = trim($_POST['maintenance_msg'] ?? '');
+        if ($prodId > 0) {
+            $pdo->prepare("UPDATE products SET is_maintenance = ?, is_active = ?, maintenance_msg = ? WHERE id = ? AND subdomain_id = 0")
+                ->execute([$turnOn ? 1 : 0, $turnOn ? 0 : 1, $maintMsg !== '' ? $maintMsg : null, $prodId]);
+            $toast = ['type' => 'success', 'msg' => $turnOn ? '🔧 Product is now in MAINTENANCE (shows red on store)' : '✅ Product is back ONLINE'];
+        }
+    }
+
     if ($act === 'edit_product_full') {
         $prodId = (int)$_POST['product_id'];
         $name = trim($_POST['name'] ?? '');
@@ -1136,6 +1151,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
 
         $pdo->prepare("UPDATE products SET name = ?, sort_order = ?, image_url = ?, banner_url = ?, logo_url = ?, download_link = ?, setup_link = ?, app_download_url = ?, description = ?, tags = ?, category = ?, is_pinned = ?, is_active = ? WHERE id = ? AND subdomain_id = 0")
             ->execute([$name, $sortOrder, $bannerUrl, $bannerUrl, $logoUrl, $downloadLink, $setupLink, $appDownloadUrl, $description, $tags, $category, $isPinned, $isActive, $prodId]);
+
+        // 🔧 Maintenance: Online আনচেক = মেইনটেনেন্স (স্টোরে লাল কার্ড + নোটিশ দেখাবে)
+        try {
+            $maintMsgEdit = trim($_POST['maintenance_msg'] ?? '');
+            $pdo->prepare("UPDATE products SET is_maintenance = ?, maintenance_msg = ? WHERE id = ? AND subdomain_id = 0")
+                ->execute([$isActive ? 0 : 1, $maintMsgEdit !== '' ? $maintMsgEdit : null, $prodId]);
+        } catch (Throwable $e) {}
 
         try {
             $stmtCache = $pdo->prepare("INSERT INTO product_media_cache (product_name, logo_url, banner_url, download_link, setup_link, tags, category, description) 
@@ -2251,6 +2273,37 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
         ::-webkit-scrollbar-track { background: #030612; }
         ::-webkit-scrollbar-thumb { background: #1e293b; border-radius: 6px; }
         ::-webkit-scrollbar-thumb:hover { background: var(--site-accent); }
+
+        /* =====================================================================
+           📱 MOBILE / PHONE FIXES — পুরো প্যানেল ফোনে ঠিকঠাক দেখাবে
+           ===================================================================== */
+        :root { color-scheme: dark; }               /* ফোনের সাদা select/date পিকার ডার্ক হবে */
+        html, body { max-width: 100%; overflow-x: hidden; }
+        select, option, optgroup { background-color: #0b1224; color: #e2e8f0; }
+        select {
+            -webkit-appearance: none; appearance: none;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2322d3ee' stroke-width='3'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+            background-repeat: no-repeat; background-position: right 0.75rem center; background-size: 12px;
+            padding-right: 2.2rem !important;
+        }
+        input, select, textarea, button { max-width: 100%; }
+        img { max-width: 100%; }
+        input[type="date"], input[type="datetime-local"], input[type="time"] { min-height: 2.6rem; }
+        .prod-maint-admin { border-color: rgba(239, 68, 68, 0.6) !important; background: linear-gradient(180deg, #1f0a10 0%, #0b0610 100%) !important; box-shadow: 0 0 14px rgba(239, 68, 68, 0.18); }
+        /* মোডাল ফোনে স্ক্রিনের বাইরে যাবে না, ভেতরে স্ক্রল হবে */
+        .fixed.inset-0 > .box-panel, .fixed.inset-0 > div > .box-panel { max-height: calc(100vh - 2rem); max-height: calc(100dvh - 2rem); overflow-y: auto; }
+        @media (max-width: 640px) {
+            main { padding-left: 0.75rem !important; padding-right: 0.75rem !important; margin-top: 1rem !important; }
+            .box-panel { padding: 1rem; border-radius: 16px; }
+            .stat-card { padding: 0.9rem 1rem; border-radius: 14px; }
+            .table-roomy th { padding: 0.7rem 0.8rem; font-size: 10px; }
+            .table-roomy td { padding: 0.75rem 0.8rem; }
+            h2.text-3xl { font-size: 1.5rem; line-height: 2rem; }
+            .stat-card.h-32 { height: auto; min-height: 6.5rem; }
+            .whitespace-nowrap.btn-purple, .whitespace-nowrap.btn-cyan { white-space: normal; }
+            #adminDrawer { width: min(310px, 86vw); }
+            header .text-sm.uppercase { max-width: 42vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        }
     </style>
 </head>
 <body class="min-h-screen pb-16 antialiased">
@@ -2533,7 +2586,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                     <div class="bg-slate-900/90 p-4 rounded-2xl border border-slate-800 space-y-3">
                         <span class="text-xs font-bold text-slate-300 uppercase block font-sans">⚡ Quick Action: All Products Together</span>
                         <div class="flex flex-col sm:flex-row items-center gap-2.5">
-                            <form method="POST" class="flex items-center gap-2 w-full sm:w-auto">
+                            <form method="POST" class="flex flex-wrap items-center gap-2 w-full sm:w-auto">
                                 <input type="hidden" name="admin_action" value="apply_bulk_product_discount">
                                 <input type="hidden" name="active_tab" value="tab-discounts">
                                 <input type="hidden" name="disc_sub_tab" value="disc-view-products">
@@ -3004,10 +3057,10 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                 <?php else: ?>
                     <?php foreach ($productsData as $prod): 
                         $planCount = count($prod['plans']);
-                        $isProdActive = (int)($prod['is_active'] ?? 1) === 1;
+                        $isProdActive = (int)($prod['is_active'] ?? 1) === 1 && (int)($prod['is_maintenance'] ?? 0) === 0;
                     ?>
-                        <div class="box-panel p-4 space-y-3 hover:border-cyan-500/30 transition">
-                            <div class="flex items-center justify-between">
+                        <div class="box-panel p-4 space-y-3 transition <?= $isProdActive ? 'hover:border-cyan-500/30' : 'prod-maint-admin' ?>">
+                            <div class="flex flex-wrap items-center justify-between gap-2">
                                 <div class="flex items-center space-x-3.5 overflow-hidden">
                                     <span class="w-8 h-8 rounded-xl bg-slate-900 border border-cyan-500/30 flex items-center justify-center text-xs text-cyan-300 font-bold flex-shrink-0">
                                         #<?= $prod['sort_order'] ?>
@@ -3043,6 +3096,18 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                     </button>
                                 </div>
                             </div>
+
+                            <!-- 🔧 QUICK MAINTENANCE CONTROL -->
+                            <form method="POST" class="flex items-center gap-2 p-2 rounded-xl <?= $isProdActive ? 'bg-slate-900/60 border border-slate-800' : 'bg-red-950/40 border border-red-500/40' ?>">
+                                <input type="hidden" name="admin_action" value="toggle_product_maintenance">
+                                <input type="hidden" name="active_tab" value="tab-products">
+                                <input type="hidden" name="product_id" value="<?= (int)$prod['id'] ?>">
+                                <input type="hidden" name="maint_state" value="<?= $isProdActive ? '1' : '0' ?>">
+                                <input type="text" name="maintenance_msg" value="<?= htmlspecialchars($prod['maintenance_msg'] ?? '') ?>" placeholder="Notice: e.g. Update চলছে, ৬টায় চালু" class="flex-1 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-amber-300 outline-none text-xs">
+                                <button type="submit" class="py-2 px-3 rounded-lg font-black text-[11px] uppercase tracking-wider whitespace-nowrap transition <?= $isProdActive ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950' ?>">
+                                    <?= $isProdActive ? '🔧 Maintenance' : '✅ Go Online' ?>
+                                </button>
+                            </form>
 
                             <div id="plan-accordion-<?= $prod['id'] ?>" class="hidden pt-3 border-t border-slate-800 space-y-2">
                                 <?php if ($planCount === 0): ?>
@@ -5627,7 +5692,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
             document.getElementById('editModalMaintMsg').value = prod.maintenance_msg || '';
             document.getElementById('editModalIsPinned').checked = (parseInt(prod.is_pinned) === 1);
 
-            const isActive = (parseInt(prod.is_active) === 1);
+            const isActive = (parseInt(prod.is_active) === 1) && (parseInt(prod.is_maintenance || 0) !== 1);
             const activeCb = document.getElementById('editModalIsActive');
             activeCb.checked = isActive;
             document.getElementById('editModalActiveText').innerText = isActive ? 'Online' : 'In Maintenance';
