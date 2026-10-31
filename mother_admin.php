@@ -1204,6 +1204,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
             $toast = ['type' => 'success', 'msg' => $turnOn ? '🔄 HWID Reset ENABLED for this product' : '⛔ HWID Reset DISABLED for this product'];
         }
     }
+    // 💲 QUICK PLAN PRICES (Products → প্রোডাক্টের ভেতরে Customer $ / Reseller $)
+    if ($act === 'save_plan_prices_quick') {
+        $prodId = (int)($_POST['product_id'] ?? 0);
+        $userPrices = $_POST['qp_user'] ?? []; $resPrices = $_POST['qp_res'] ?? [];
+        $cnt = 0;
+        if ($prodId > 0 && is_array($userPrices)) {
+            $upQ = $pdo->prepare("UPDATE product_plans SET user_price = ?, regular_price = ?, reseller_price = ? WHERE id = ? AND product_id = ? AND subdomain_id = 0");
+            foreach ($userPrices as $plId => $uRaw) {
+                if (!is_numeric($uRaw) || (float)$uRaw <= 0) continue;
+                $uP = round((float)$uRaw, 2);
+                $rRaw = trim((string)($resPrices[$plId] ?? ''));
+                $rP = (is_numeric($rRaw) && (float)$rRaw > 0) ? round((float)$rRaw, 2) : 0.00;
+                $upQ->execute([$uP, $uP, $rP, (int)$plId, $prodId]);
+                $cnt++;
+            }
+        }
+        $toast = ['type' => 'success', 'msg' => "Prices saved for $cnt plan(s) — Customer & Reseller!"];
+    }
+
     // 🔧 QUICK PRODUCT MAINTENANCE TOGGLE (প্রোডাক্ট লিস্ট থেকে এক ক্লিকে)
     if ($act === 'toggle_product_maintenance') {
         $prodId   = (int)($_POST['product_id'] ?? 0);
@@ -1283,7 +1302,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
             $upPlan = $pdo->prepare("UPDATE product_plans SET user_price = ?, regular_price = ?, reseller_price = ?, reward_coins = ?, coin_price = ? WHERE id = ? AND product_id = ? AND subdomain_id = 0");
             foreach ($_POST['plan_user_price'] as $planId => $uPrice) {
                 $uP = max(0.01, (float)$uPrice);
-                $rP = isset($_POST['plan_reseller_price'][$planId]) ? max(0.01, (float)$_POST['plan_reseller_price'][$planId]) : round($uP * 0.8, 2);
+                // রিসেলার প্রাইস ফাঁকা/না থাকলে আগের রিসেলার প্রাইস রাখা হবে (আগে প্রতি সেভে Customer এর 80% বসে যেত)
+                $rPRaw = trim((string)($_POST['plan_reseller_price'][$planId] ?? ''));
+                if (is_numeric($rPRaw) && (float)$rPRaw > 0) { $rP = round((float)$rPRaw, 2); }
+                else { $stOldR = $pdo->prepare("SELECT reseller_price FROM product_plans WHERE id = ? LIMIT 1"); $stOldR->execute([(int)$planId]); $rP = (float)($stOldR->fetchColumn() ?: 0); }
                 $rCoins = isset($_POST['plan_reward_coins'][$planId]) ? max(0, (int)$_POST['plan_reward_coins'][$planId]) : 0;
                 $cPrice = isset($_POST['plan_coin_price'][$planId]) ? max(0, (int)$_POST['plan_coin_price'][$planId]) : 0;
                 
@@ -2576,15 +2598,15 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                     <i class="fa-solid fa-boxes-stacked w-4 text-cyan-400"></i><span>Products Catalog</span>
                 </button>
 
-                <button id="btn-nav-tab-discounts" onclick="switchAdminTab('tab-discounts', 'Discount Management Hub', this)" class="drawer-nav-btn border-purple-500/25 bg-purple-950/20 text-purple-300">
+                <button id="btn-nav-tab-discounts" onclick="switchAdminTab('tab-discounts', 'Discount Management Hub', this)" class="drawer-nav-btn">
                     <i class="fa-solid fa-tags w-4 text-purple-400"></i><span>Discount Hub</span>
                 </button>
 
-                <button id="btn-nav-tab-gateways" onclick="switchAdminTab('tab-gateways', 'Payment Gateway Rules & SNZPay', this)" class="drawer-nav-btn border-teal-500/25 bg-teal-950/20 text-teal-300">
+                <button id="btn-nav-tab-gateways" onclick="switchAdminTab('tab-gateways', 'Payment Gateway Rules & SNZPay', this)" class="drawer-nav-btn">
                     <i class="fa-solid fa-building-columns w-4 text-emerald-400"></i><span>Payment Gateways</span>
                 </button>
 
-                <button id="btn-nav-tab-connectkm" onclick="switchAdminTab('tab-connectkm', 'Key Manager Integration', this)" class="drawer-nav-btn border-cyan-500/20 bg-cyan-950/20 text-cyan-300">
+                <button id="btn-nav-tab-connectkm" onclick="switchAdminTab('tab-connectkm', 'Key Manager Integration', this)" class="drawer-nav-btn">
                     <i class="fa-solid fa-bolt-lightning w-4 text-amber-400"></i><span>Connect Key Manager</span>
                 </button>
                 <button id="btn-nav-tab-spinwheel" onclick="switchAdminTab('tab-spinwheel', 'Spin Control & Rewards', this)" class="drawer-nav-btn">
@@ -2614,10 +2636,10 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                 <button id="btn-nav-tab-push" onclick="switchAdminTab('tab-push', 'Push Notifications', this)" class="drawer-nav-btn">
                     <i class="fa-solid fa-paper-plane w-4 text-rose-400"></i><span>Push Notification</span>
                 </button>
-                <button id="btn-nav-tab-subdomains" onclick="switchAdminTab('tab-subdomains', 'Tenants Subdomains', this)" class="drawer-nav-btn border-blue-500/25 bg-blue-950/20 text-blue-300">
+                <button id="btn-nav-tab-subdomains" onclick="switchAdminTab('tab-subdomains', 'Tenants Subdomains', this)" class="drawer-nav-btn">
                     <i class="fa-solid fa-network-wired w-4 text-blue-400"></i><span>Sub Domain (Tenants)</span>
                 </button>
-                <button id="btn-nav-tab-themecolor" onclick="switchAdminTab('tab-themecolor', 'Main Site Theme Color', this)" class="drawer-nav-btn border-emerald-500/25 bg-emerald-950/20 text-emerald-300">
+                <button id="btn-nav-tab-themecolor" onclick="switchAdminTab('tab-themecolor', 'Main Site Theme Color', this)" class="drawer-nav-btn">
                     <i class="fa-solid fa-palette w-4 text-emerald-400"></i><span>Main Site Theme Color</span>
                 </button>
             </nav>
@@ -3456,14 +3478,23 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                 <?php if ($planCount === 0): ?>
                                     <p class="text-xs text-slate-500 py-1.5 font-sans">No validity plans attached. Click "+ Plan" above.</p>
                                 <?php else: ?>
+                                    <form method="POST" class="space-y-2">
+                                    <input type="hidden" name="admin_action" value="save_plan_prices_quick">
+                                    <input type="hidden" name="active_tab" value="tab-products">
+                                    <input type="hidden" name="product_id" value="<?= (int)$prod['id'] ?>">
+                                    <div class="flex items-center justify-between text-[10px] font-bold px-1">
+                                        <span class="text-slate-400 uppercase">💲 Plan Prices (USD)</span>
+                                        <span class="text-emerald-400">1 USD = ৳<?= htmlspecialchars((string)$effectiveBdtRate) ?></span>
+                                    </div>
                                     <?php foreach ($prod['plans'] as $pl): 
                                         $bdtP = round((float)$pl['user_price'] * $effectiveBdtRate, 0);
+                                        $plResP = (float)($pl['reseller_price'] ?? 0);
                                         $rCoins = (int)($pl['reward_coins'] ?? 0);
                                         $cPrice = (int)($pl['coin_price'] ?? 0);
                                         $plDisc = (float)($pl['discount_percent'] ?? 0);
                                     ?>
-                                        <div class="flex items-center justify-between p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs">
-                                            <div>
+                                        <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs">
+                                            <div class="min-w-0">
                                                 <strong class="text-white"><?= htmlspecialchars($pl['plan_title']) ?></strong>
                                                 <div class="flex items-center space-x-2 mt-1">
                                                     <span class="text-[10px] text-cyan-400 font-mono">KM ID: #<?= $pl['api_plan_id'] ?: 'None' ?></span>
@@ -3478,12 +3509,22 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                                     <?php endif; ?>
                                                 </div>
                                             </div>
-                                            <div class="text-right">
-                                                <span class="text-emerald-400 font-bold text-xs">৳<?= number_format($bdtP, 0) ?> BDT</span>
-                                                <span class="text-[10px] text-slate-400 block font-mono">($<?= number_format((float)$pl['user_price'], 2) ?> USD)</span>
+                                            <div class="grid grid-cols-2 gap-2 sm:w-64 flex-shrink-0">
+                                                <label class="block">
+                                                    <span class="text-[9px] text-cyan-300 font-bold block mb-0.5">👤 Customer $</span>
+                                                    <input type="number" step="0.01" min="0.01" name="qp_user[<?= (int)$pl['id'] ?>]" value="<?= number_format((float)$pl['user_price'], 2, '.', '') ?>" oninput="qpBdt(this)" data-rate="<?= (float)$effectiveBdtRate ?>" class="w-full bg-[#030612] border border-cyan-500/30 p-1.5 rounded-lg text-cyan-300 font-mono font-bold text-xs outline-none text-right">
+                                                    <span class="qp-bdt text-[9px] text-slate-500 font-mono block text-right">≈ ৳<?= number_format($bdtP, 0) ?></span>
+                                                </label>
+                                                <label class="block">
+                                                    <span class="text-[9px] text-emerald-300 font-bold block mb-0.5">🏪 Reseller $</span>
+                                                    <input type="number" step="0.01" min="0.01" name="qp_res[<?= (int)$pl['id'] ?>]" value="<?= $plResP > 0 ? number_format($plResP, 2, '.', '') : '' ?>" placeholder="<?= number_format((float)$pl['user_price'], 2, '.', '') ?>" oninput="qpBdt(this)" data-rate="<?= (float)$effectiveBdtRate ?>" class="w-full bg-[#030612] border border-emerald-500/30 p-1.5 rounded-lg text-emerald-300 font-mono font-bold text-xs outline-none text-right">
+                                                    <span class="qp-bdt text-[9px] text-slate-500 font-mono block text-right"><?= $plResP > 0 ? '≈ ৳' . number_format($plResP * $effectiveBdtRate, 0) : 'same as customer' ?></span>
+                                                </label>
                                             </div>
                                         </div>
                                     <?php endforeach; ?>
+                                    <button type="submit" class="w-full py-2.5 rounded-xl btn-cyan uppercase text-[11px] font-black tracking-wider">💾 Save Prices</button>
+                                    </form>
                                 <?php endif; ?>
                             </div>
                         </div>
@@ -5932,6 +5973,11 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
             document.getElementById('drawerOverlay').classList.toggle('hidden');
         }
 
+        function qpBdt(inp) {
+            const rate = parseFloat(inp.dataset.rate) || 0, v = parseFloat(inp.value) || 0;
+            const out = inp.parentElement.querySelector('.qp-bdt');
+            if (out) out.textContent = v > 0 ? '≈ ৳' + Math.round(v * rate).toLocaleString() : 'same as customer';
+        }
         function switchAdminTab(sectionId, titleName = '', btnEl = null) {
             document.querySelectorAll('.tab-section').forEach(sec => sec.classList.add('hidden'));
             const target = document.getElementById(sectionId);
@@ -6226,9 +6272,14 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                             <strong class="text-white truncate text-xs">${pl.plan_title}</strong>
                             <span class="text-[9px] text-slate-500 font-mono">KM ID #${pl.api_plan_id || 0}</span>
                         </div>
-                        <div class="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 border-t border-slate-800/60">
+                        <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-slate-800/60">
                             <div>
-                                <label class="text-[9px] text-slate-400 block font-bold">Price ($ USD)</label>
+                                <label class="text-[9px] text-emerald-300 block font-bold">🏪 Reseller $</label>
+                                <input type="number" step="0.01" min="0.01" name="plan_reseller_price[${pl.id}]" value="${parseFloat(pl.reseller_price) > 0 ? parseFloat(pl.reseller_price).toFixed(2) : ''}" placeholder="${parseFloat(pl.user_price).toFixed(2)}" class="w-full bg-[#030612] border border-emerald-500/30 p-1.5 rounded-lg text-emerald-300 font-mono font-bold text-xs outline-none mt-0.5">
+                                <span class="text-[9px] text-slate-500 font-mono">≈ ৳${Math.round((parseFloat(pl.reseller_price) || 0) * currentBdtRate)} BDT</span>
+                            </div>
+                            <div>
+                                <label class="text-[9px] text-cyan-300 block font-bold">👤 Customer $</label>
                                 <div class="flex items-center space-x-1 mt-0.5">
                                     <input type="number" step="0.01" name="plan_user_price[${pl.id}]" value="${parseFloat(pl.user_price).toFixed(2)}" class="w-full bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-emerald-400 font-mono font-bold text-xs outline-none">
                                 </div>
@@ -6540,8 +6591,13 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
         }
 
         window.addEventListener('DOMContentLoaded', () => {
-            const initialTab = '<?= $activeTab ?>' !== 'tab-overview' ? '<?= $activeTab ?>' : (sessionStorage.getItem('admin_active_tab') || 'tab-overview');
-            const initialTitle = sessionStorage.getItem('admin_active_title') || 'Dashboard Overview';
+            const postedTab = <?= json_encode(preg_replace('/[^a-z0-9_-]/i', '', (string)$activeTab)) ?>;
+            let initialTab = postedTab !== 'tab-overview' ? postedTab : (sessionStorage.getItem('admin_active_tab') || 'tab-overview');
+            if (!document.getElementById(initialTab)) initialTab = 'tab-overview';
+            // টাইটেল সবসময় যে ট্যাব খোলা সেই বাটনের নাম থেকে আসবে (আগে পুরনো ট্যাবের নাম দেখাত)
+            const navBtnForTitle = document.getElementById('btn-nav-' + initialTab);
+            const initialTitle = navBtnForTitle ? navBtnForTitle.textContent.trim().replace(/\s+/g, ' ') : 'Dashboard Overview';
+            sessionStorage.setItem('admin_active_tab', initialTab);
             
             document.querySelectorAll('.tab-section').forEach(sec => sec.classList.add('hidden'));
             const targetSection = document.getElementById(initialTab);
@@ -6553,7 +6609,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
             if (activeBtn) activeBtn.classList.add('active');
 
             if (initialTab === 'tab-discounts') {
-                const discSub = '<?= $activeDiscSubTab ?>' || sessionStorage.getItem('disc_active_subtab') || 'disc-view-products';
+                const discSub = <?= json_encode(preg_replace('/[^a-z0-9_-]/i', '', (string)($activeDiscSubTab ?? ''))) ?> || sessionStorage.getItem('disc_active_subtab') || 'disc-view-products';
                 switchDiscountSubTab(discSub);
             }
 
