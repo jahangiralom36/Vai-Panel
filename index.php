@@ -685,12 +685,12 @@ if (!function_exists('vpRecordCouponUse')) {
 if (!function_exists('vpDefaultResetProducts')) {
     function vpDefaultResetProducts(): array {
         return [
-            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 12,  'enabled' => 1],
+            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 11,  'enabled' => 1],
+            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 3,   'enabled' => 1],
+            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 9,   'enabled' => 1],
+            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 4,   'enabled' => 1],
+            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 2,   'enabled' => 1],
             ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
         ];
     }
@@ -705,6 +705,9 @@ if (!function_exists('vpGetResetProducts')) {
             if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
         } catch (Throwable $e) {}
         if ($list === null) $list = vpDefaultResetProducts();
+        // সেভ করা লিস্টে API ID 0 থাকলে ডিফল্ট ID বসবে (KeyManager reset API IDs)
+        $defaultIds = [];
+        foreach (vpDefaultResetProducts() as $__d) { $defaultIds[$__d['slug']] = (int)$__d['api_id']; }
         $out = [];
         foreach ($list as $r) {
             $name = trim((string)($r['name'] ?? ''));
@@ -712,7 +715,7 @@ if (!function_exists('vpGetResetProducts')) {
             $row = [
                 'slug'    => (string)($r['slug'] ?? substr(md5($name), 0, 10)),
                 'name'    => $name,
-                'api_id'  => max(0, (int)($r['api_id'] ?? 0)),
+                'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
                 'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
             ];
             if ($onlyEnabled && !$row['enabled']) continue;
@@ -3507,27 +3510,35 @@ if ($isFirebaseEnabled) {
         :root { color-scheme: dark; }
         select, option { background-color: #070210; color: #e5e7eb; }
 
-        /* ===== RESET PAGE (screenshot style: white card, green accent) ===== */
-        .rk-card { background: #ffffff; border: 1.5px solid #e5e7eb; border-radius: 22px; padding: 22px 18px; box-shadow: 0 6px 24px rgba(0,0,0,.25); color: #111827; color-scheme: light; }
-        .rk-title { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px; font-weight: 800; letter-spacing: .06em; color: #111827; display: flex; align-items: center; justify-content: center; gap: 8px; }
-        .rk-sub { font-size: 12px; color: #6b7280; }
-        .rk-label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: #374151; }
-        .rk-input { width: 100%; background: #f8fafc; border: 1.5px solid #e5e7eb; border-radius: 14px; padding: 13px 14px; font-size: 14px; color: #111827; outline: none; transition: border-color .15s, box-shadow .15s; }
-        .rk-input:focus { border-color: #10b981; box-shadow: 0 0 0 3px rgba(16,185,129,.15); background: #ffffff; }
-        .rk-select { -webkit-appearance: none; appearance: none; border-color: #10b981; padding-right: 40px;
-            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%23111827' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
+        /* ===== RESET PAGE — সাইটের ডার্ক নিয়ন থিমের সাথে মিলিয়ে (cyan + magenta + emerald) ===== */
+        .rk-card { background: linear-gradient(180deg, #110724 0%, #06020c 100%); border: 1.5px solid rgba(0, 245, 255, 0.35); border-radius: 22px; padding: 22px 18px;
+            box-shadow: 0 0 22px rgba(0, 245, 255, 0.10), 0 0 30px rgba(217, 70, 239, 0.10), inset 0 1px 0 rgba(255,255,255,.04); color: #e5e7eb; }
+        .rk-title { font-family: 'JetBrains Mono', ui-monospace, monospace; font-size: 15px; font-weight: 800; letter-spacing: .06em; color: #ffffff;
+            text-shadow: 0 0 6px rgba(255,255,255,.35), 0 0 12px rgba(0,245,255,.35); display: flex; align-items: center; justify-content: center; gap: 8px; }
+        .rk-title i { color: var(--primary-cyan, #00f5ff) !important; text-shadow: 0 0 8px rgba(0,245,255,.7); }
+        .rk-sub { font-size: 12px; color: rgba(216, 180, 254, 0.75); }
+        .rk-label { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: #22d3ee; }
+        .rk-input { width: 100%; background: #070210; border: 1.5px solid #241040; border-radius: 14px; padding: 13px 14px; font-size: 14px; color: #ffffff; outline: none; transition: border-color .15s, box-shadow .15s; }
+        .rk-input:focus { border-color: var(--primary-cyan, #00f5ff); box-shadow: 0 0 0 3px rgba(0,245,255,.15), 0 0 12px rgba(0,245,255,.25); }
+        .rk-select { -webkit-appearance: none; appearance: none; border-color: rgba(217, 70, 239, 0.55); padding-right: 40px; font-weight: 700;
+            background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='14' height='14' viewBox='0 0 24 24' fill='none' stroke='%2300f5ff' stroke-width='2.5'%3E%3Cpolyline points='6 9 12 15 18 9'/%3E%3C/svg%3E");
             background-repeat: no-repeat; background-position: right 14px center; }
-        .rk-select option { background: #ffffff; color: #111827; }
-        .rk-key { font-family: 'JetBrains Mono', ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; }
-        .rk-key::placeholder { color: #9ca3af; }
-        .rk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; background: #059669; color: #ffffff; font-weight: 800; font-size: 15px; letter-spacing: .04em; border-radius: 14px; padding: 15px 18px; box-shadow: 0 6px 16px rgba(5,150,105,.35); transition: transform .1s, background .15s; }
-        .rk-btn:hover { background: #047857; } .rk-btn:active { transform: scale(.98); } .rk-btn:disabled { opacity: .6; }
-        .rk-suggest { position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; background: #ffffff; border: 1.5px solid #d1fae5; border-radius: 14px; max-height: 200px; overflow-y: auto; z-index: 30; box-shadow: 0 10px 30px rgba(0,0,0,.18); padding: 4px; }
+        .rk-select option { background: #0d061c; color: #ffffff; }
+        .rk-key { font-family: 'JetBrains Mono', ui-monospace, monospace; text-transform: uppercase; letter-spacing: .05em; color: #67e8f9; font-weight: 700; }
+        .rk-key::placeholder { color: #6b5a8a; font-weight: 500; }
+        .rk-btn { display: inline-flex; align-items: center; justify-content: center; gap: 10px; color: #ffffff; font-weight: 800; font-size: 15px; letter-spacing: .05em;
+            border-radius: 14px; padding: 15px 18px; background: linear-gradient(90deg, #06b6d4 0%, #d946ef 55%, #a855f7 100%);
+            box-shadow: 0 4px 18px rgba(217, 70, 239, 0.40), 0 0 12px rgba(0, 245, 255, 0.25); transition: transform .1s, filter .15s; }
+        .rk-btn:hover { filter: brightness(1.1); } .rk-btn:active { transform: scale(.98); } .rk-btn:disabled { opacity: .6; }
+        .rk-suggest { position: absolute; left: 0; right: 0; top: 100%; margin-top: 4px; background: #0d061c; border: 1.5px solid rgba(0,245,255,.4); border-radius: 14px;
+            max-height: 200px; overflow-y: auto; z-index: 30; box-shadow: 0 10px 30px rgba(0,0,0,.6); padding: 4px; }
         .rk-suggest-row { padding: 8px 10px; border-radius: 10px; cursor: pointer; display: flex; flex-direction: column; }
-        .rk-suggest-row:hover { background: #ecfdf5; }
+        .rk-suggest-row:hover { background: rgba(0,245,255,.10); }
+        .rk-suggest-row .rk-sg-key { font-family: monospace; font-weight: 700; color: #67e8f9; font-size: 13px; }
+        .rk-suggest-row .rk-sg-sub { font-size: 11px; color: #a78bfa; }
         .rk-result { margin-top: 14px; padding: 12px 14px; border-radius: 14px; font-size: 13px; line-height: 1.5; border: 1.5px solid; }
-        .rk-result.ok { background: #ecfdf5; border-color: #10b981; color: #065f46; }
-        .rk-result.err { background: #fef2f2; border-color: #f87171; color: #991b1b; }
+        .rk-result.ok { background: rgba(0, 255, 136, 0.08); border-color: #00ff88; color: #86efac; box-shadow: 0 0 12px rgba(0,255,136,.15); }
+        .rk-result.err { background: rgba(244, 63, 94, 0.08); border-color: #f43f5e; color: #fda4af; }
         /* ===== HEADER COLOR SYSTEM ===== */
         .hdr-store-name { color: #ffffff; text-shadow: 0 0 4px rgba(255,255,255,.55), 0 0 10px rgba(0,245,255,.45), 0 0 18px rgba(217,70,239,.30); }
         .hdr-portal-label { color: #22d3ee; text-shadow: 0 0 6px rgba(34,211,238,.55); }
@@ -4224,13 +4235,13 @@ if ($isFirebaseEnabled) {
         <section id="page-resetkey" class="page-section hidden w-full font-sans">
             <div class="rk-card">
                 <div class="text-center space-y-1 pb-1">
-                    <h2 class="rk-title"><i class="fa-solid fa-arrows-rotate" style="color:#059669"></i> RESET LICENSE HARDWARE ID</h2>
+                    <h2 class="rk-title"><i class="fa-solid fa-arrows-rotate"></i> RESET LICENSE HARDWARE ID</h2>
                     <p class="rk-sub">Select product &rarr; enter your key &rarr; reset HWID</p>
                 </div>
 
                 <?php if (!$isLoggedIn): ?>
                     <div class="text-center py-6 space-y-3">
-                        <i class="fa-solid fa-lock text-3xl block" style="color:#059669"></i>
+                        <i class="fa-solid fa-lock text-3xl block" style="color:#00f5ff"></i>
                         <p class="rk-label" style="justify-content:center">Please login to reset your key</p>
                         <button type="button" onclick="openAuthModal('login')" class="rk-btn">Login Now</button>
                     </div>
@@ -6671,7 +6682,7 @@ document.addEventListener('DOMContentLoaded', function() {
             matches.forEach(it => {
                 const row = document.createElement('div');
                 row.className = 'rk-suggest-row';
-                row.innerHTML = `<span style="font-family:monospace;font-weight:700;color:#065f46;font-size:13px">${escapeHtmlRs(it.license_key)}</span><span style="font-size:11px;color:#6b7280">${escapeHtmlRs(it.validity || 'Purchased key')}</span>`;
+                row.innerHTML = `<span class="rk-sg-key">${escapeHtmlRs(it.license_key)}</span><span class="rk-sg-sub">${escapeHtmlRs(it.validity || 'Purchased key')}</span>`;
                 row.onmousedown = (ev) => { ev.preventDefault(); document.getElementById('resetKeySearchInput').value = it.license_key; box.classList.add('hidden'); };
                 box.appendChild(row);
             });

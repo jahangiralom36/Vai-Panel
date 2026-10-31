@@ -605,12 +605,12 @@ function km_get_cached_provider_balance(PDO $pdo): string {
 if (!function_exists('vpDefaultResetProducts')) {
     function vpDefaultResetProducts(): array {
         return [
-            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 0,  'enabled' => 1],
-            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 0,  'enabled' => 1],
+            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 12,  'enabled' => 1],
+            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 11,  'enabled' => 1],
+            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 3,   'enabled' => 1],
+            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 9,   'enabled' => 1],
+            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 4,   'enabled' => 1],
+            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 2,   'enabled' => 1],
             ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
         ];
     }
@@ -625,6 +625,9 @@ if (!function_exists('vpGetResetProducts')) {
             if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
         } catch (Throwable $e) {}
         if ($list === null) $list = vpDefaultResetProducts();
+        // সেভ করা লিস্টে API ID 0 থাকলে ডিফল্ট ID বসবে (KeyManager reset API IDs)
+        $defaultIds = [];
+        foreach (vpDefaultResetProducts() as $__d) { $defaultIds[$__d['slug']] = (int)$__d['api_id']; }
         $out = [];
         foreach ($list as $r) {
             $name = trim((string)($r['name'] ?? ''));
@@ -632,7 +635,7 @@ if (!function_exists('vpGetResetProducts')) {
             $row = [
                 'slug'    => (string)($r['slug'] ?? substr(md5($name), 0, 10)),
                 'name'    => $name,
-                'api_id'  => max(0, (int)($r['api_id'] ?? 0)),
+                'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
                 'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
             ];
             if ($onlyEnabled && !$row['enabled']) continue;
