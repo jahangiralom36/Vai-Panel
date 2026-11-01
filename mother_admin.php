@@ -647,6 +647,99 @@ if (!function_exists('vpGetResetProducts')) {
     }
 }
 
+
+// ====================================================================
+// 🛡️ MANUAL ORDER DELIVERY — অ্যাডমিন Approve করলে কি ডেলিভারি হয় (ব্যালেন্সে টাকা যোগ হয় না)
+// ====================================================================
+if (!function_exists('vpIsOrderTrx')) {
+    function vpIsOrderTrx(array $t): bool {
+        return (($t['tx_type'] ?? '') === 'order') || stripos((string)($t['method'] ?? ''), 'Manual Order') !== false;
+    }
+}
+if (!function_exists('vpAdminDeliverOrder')) {
+    function vpAdminDeliverOrder(PDO $pdo, array $trx, int $subId, array $storeSettings, string $sourceLabel): array {
+        $planId = (int)($trx['order_plan_id'] ?? 0);
+        $qty    = max(1, min(50, (int)($trx['order_qty'] ?? 1)));
+        if ($planId <= 0) return ['ok' => false, 'message' => 'This old order has no plan saved. Use "Credit Wallet" or "Reject".'];
+
+        $st = $pdo->prepare("SELECT pl.*, p.id AS real_product_id, p.name AS product_name,
+                                    COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') AS plan_label
+                             FROM product_plans pl JOIN products p ON p.id = pl.product_id
+                             WHERE pl.id = ? AND p.subdomain_id = ? LIMIT 1");
+        $st->execute([$planId, $subId]);
+        $plan = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$plan) return ['ok' => false, 'message' => 'Ordered plan no longer exists.'];
+
+        $keys = []; $stockIds = [];
+        $sk = $pdo->prepare("SELECT id, license_key FROM stock_keys WHERE plan_id = ? AND status = 'available' AND subdomain_id = ? ORDER BY id ASC LIMIT " . (int)$qty);
+        $sk->execute([$planId, $subId]);
+        $rows = $sk->fetchAll(PDO::FETCH_ASSOC);
+        if (count($rows) === $qty) {
+            $stockIds = array_map('intval', array_column($rows, 'id'));
+            $pdo->exec("UPDATE stock_keys SET status = 'used' WHERE id IN (" . implode(',', $stockIds) . ")");
+            $keys = array_column($rows, 'license_key');
+        } else {
+            $kmUrl = trim((string)($storeSettings['km_api_url'] ?? ''));
+            $kmKey = trim((string)($storeSettings['km_api_key'] ?? ''));
+            if ($kmUrl === '' || $kmKey === '') return ['ok' => false, 'message' => 'Out of stock and Key Manager not connected. Add stock first.'];
+            $endpoint = rtrim($kmUrl, '/');
+            if (stripos($endpoint, '.php') === false) $endpoint .= '/api.php';
+            $apiPlan = (int)($plan['api_plan_id'] ?? 0) ?: $planId;
+            $ch = curl_init();
+            curl_setopt_array($ch, [
+                CURLOPT_URL => $endpoint, CURLOPT_POST => true, CURLOPT_RETURNTRANSFER => true, CURLOPT_TIMEOUT => 30,
+                CURLOPT_POSTFIELDS => http_build_query(['action' => 'generate_key', 'plan_id' => $apiPlan, 'product_id' => $apiPlan, 'quantity' => $qty, 'api_key' => $kmKey]),
+                CURLOPT_HTTPHEADER => ['X-API-Token: ' . $kmKey, 'X-API-KEY: ' . $kmKey, 'Accept: application/json'],
+                CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false,
+            ]);
+            $body = curl_exec($ch); curl_close($ch);
+            $data = json_decode((string)$body, true);
+            if (is_array($data) && (($data['status'] ?? '') === 'success' || ($data['success'] ?? false) === true)) {
+                foreach ((array)($data['keys'] ?? []) as $it) {
+                    $k = is_array($it) ? ($it['key'] ?? ($it['license_key'] ?? ($it['code'] ?? ''))) : $it;
+                    if (is_string($k) && trim($k) !== '') $keys[] = trim($k);
+                }
+                if (!$keys && !empty($data['key']) && is_string($data['key'])) $keys[] = trim($data['key']);
+            }
+            if (!$keys) return ['ok' => false, 'message' => 'Key generation failed: ' . (is_array($data) ? ($data['message'] ?? ($data['error'] ?? 'out of stock')) : 'Key Manager not reachable')];
+        }
+
+        $restore = function () use ($pdo, $stockIds) {
+            if ($stockIds) { try { $pdo->exec("UPDATE stock_keys SET status = 'available' WHERE id IN (" . implode(',', $stockIds) . ")"); } catch (Throwable $e) {} }
+        };
+        $pdo->beginTransaction();
+        try {
+            $up = $pdo->prepare("UPDATE transactions SET status = 'approved' WHERE id = ? AND subdomain_id = ? AND status = 'pending'");
+            $up->execute([(int)$trx['id'], $subId]);
+            if ($up->rowCount() !== 1) { $pdo->rollBack(); $restore(); return ['ok' => false, 'message' => 'This order was already processed.']; }
+
+            $fullName  = $plan['product_name'] . ' (' . $plan['plan_label'] . ')';
+            $unitPrice = round((float)$trx['amount'] / $qty, 4);
+            $ins = $pdo->prepare("INSERT INTO licenses (user_id, product_id, plan_id, license_key, validity, price, source, payment_type, subdomain_id) VALUES (?, ?, ?, ?, ?, ?, ?, 'direct_pay', ?)");
+            foreach ($keys as $k) $ins->execute([(int)$trx['user_id'], (int)$plan['real_product_id'], $planId, (string)$k, $fullName, $unitPrice, $sourceLabel, $subId]);
+
+            $coins = max(0, (int)($plan['reward_coins'] ?? 0)) * $qty;
+            if ($coins > 0) $pdo->prepare("UPDATE users SET coins = coins + ? WHERE id = ? AND subdomain_id = ?")->execute([$coins, (int)$trx['user_id'], $subId]);
+
+            if (!empty($trx['order_coupon'])) {
+                $cp = $pdo->prepare("SELECT id FROM coupons WHERE UPPER(code) = ? AND subdomain_id = ? LIMIT 1");
+                $cp->execute([strtoupper((string)$trx['order_coupon']), $subId]);
+                if ($cpId = (int)$cp->fetchColumn()) {
+                    $pdo->prepare("UPDATE coupons SET used_count = used_count + 1 WHERE id = ?")->execute([$cpId]);
+                    $pdo->prepare("INSERT INTO coupon_usages (coupon_id, subdomain_id, user_id, product_id, discount_bdt, order_total_bdt) VALUES (?, ?, ?, ?, 0, 0)")
+                        ->execute([$cpId, $subId, (int)$trx['user_id'], (int)$plan['real_product_id']]);
+                }
+            }
+            $pdo->commit();
+        } catch (Throwable $e) {
+            if ($pdo->inTransaction()) $pdo->rollBack();
+            $restore();
+            return ['ok' => false, 'message' => 'Delivery error: ' . $e->getMessage()];
+        }
+        return ['ok' => true, 'keys' => $keys, 'product' => $fullName];
+    }
+}
+
 function syncStackedPricesForUser(PDO $pdo, int $userId) {
     try {
         $stmtUser = $pdo->prepare("SELECT id, role, discount_percent FROM users WHERE id = ? AND subdomain_id = 0 LIMIT 1");
@@ -2146,20 +2239,33 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     }
 
     if ($act === 'manage_trx') {
-        $trxId = (int)$_POST['trx_db_id'];
-        $status = $_POST['status'];
-        $trx = $pdo->query("SELECT * FROM transactions WHERE id = $trxId AND subdomain_id = 0")->fetch();
+        $trxId  = (int)($_POST['trx_db_id'] ?? 0);
+        $status = (string)($_POST['status'] ?? '');
+        $stT = $pdo->prepare("SELECT * FROM transactions WHERE id = ? AND subdomain_id = ? LIMIT 1");
+        $stT->execute([$trxId, 0]);
+        $trx = $stT->fetch(PDO::FETCH_ASSOC);
         if ($trx && $trx['status'] === 'pending') {
-            $pdo->prepare("UPDATE transactions SET status = ? WHERE id = ? AND subdomain_id = 0")->execute([$status, $trxId]);
-            if ($status === 'approved') {
-                $bonusFloat = 0.00;
-                if (!empty($trx['bonus_amount']) && (float)$trx['bonus_amount'] > 0) {
-                    $bonusFloat = round((float)$trx['bonus_amount'] / $effectiveBdtRate, 2);
+            $isOrder = vpIsOrderTrx($trx);
+            if ($status === 'approved' && $isOrder) {
+                // 🛡️ অর্ডার: কি ডেলিভারি হবে — ব্যালেন্সে টাকা যোগ হবে না
+                $res = vpAdminDeliverOrder($pdo, $trx, 0, $settings, 'MAIN');
+                $toast = $res['ok']
+                    ? ['type' => 'success', 'msg' => '✅ Order approved — ' . count($res['keys']) . ' key(s) delivered to the customer (' . $res['product'] . ')']
+                    : ['type' => 'error', 'msg' => '⚠️ ' . $res['message']];
+            } elseif ($status === 'approved' || ($status === 'credit_wallet' && $isOrder)) {
+                // ডিপোজিট (অথবা অ্যাডমিন নিজে "Credit Wallet" বাছলে) → ব্যালেন্সে যোগ
+                $up = $pdo->prepare("UPDATE transactions SET status = 'approved' WHERE id = ? AND subdomain_id = ? AND status = 'pending'");
+                $up->execute([$trxId, 0]);
+                if ($up->rowCount() === 1) {
+                    $bonusFloat = (!empty($trx['bonus_amount']) && (float)$trx['bonus_amount'] > 0) ? round((float)$trx['bonus_amount'] / $effectiveBdtRate, 2) : 0.00;
+                    $totalCredit = max(0.0, (float)$trx['amount'] + ($isOrder ? 0.0 : $bonusFloat));
+                    $pdo->prepare("UPDATE users SET balance = balance + ? WHERE id = ? AND subdomain_id = ?")->execute([$totalCredit, $trx['user_id'], 0]);
+                    $toast = ['type' => 'success', 'msg' => $isOrder ? 'Order amount credited to customer wallet.' : 'Deposit approved & balance added!'];
                 }
-                $totalCredit = (float)$trx['amount'] + $bonusFloat;
-                $pdo->prepare("UPDATE users SET balance = balance + ? WHERE id = ? AND subdomain_id = 0")->execute([$totalCredit, $trx['user_id']]);
+            } elseif ($status === 'rejected') {
+                $pdo->prepare("UPDATE transactions SET status = 'rejected' WHERE id = ? AND subdomain_id = ? AND status = 'pending'")->execute([$trxId, 0]);
+                $toast = ['type' => 'success', 'msg' => ($isOrder ? 'Order' : 'Deposit') . ' rejected.'];
             }
-            $toast = ['type' => 'success', 'msg' => "Deposit marked $status!"];
         }
     }
 
@@ -4168,6 +4274,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                         </td>
                                         <td>
                                             <strong class="text-emerald-400 font-black text-xs">$<?= number_format((float)$t['amount'], 2) ?> USD</strong>
+                                            <?php if (vpIsOrderTrx($t)): ?><span class="block mt-1 text-[9px] font-black text-fuchsia-300 uppercase">🛒 Product Order<?= (int)($t['order_qty'] ?? 0) > 1 ? ' ×' . (int)$t['order_qty'] : '' ?></span><?php endif; ?>
                                         </td>
                                         <td>
                                             <?php if ($bonusVal > 0): ?>
@@ -4190,9 +4297,20 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                                     <input type="hidden" name="admin_action" value="manage_trx">
                                                     <input type="hidden" name="active_tab" value="tab-deposits">
                                                     <input type="hidden" name="trx_db_id" value="<?= $t['id'] ?>">
-                                                    <button type="submit" name="status" value="approved" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-[10px] tracking-wider uppercase transition shadow">
-                                                        Approve
-                                                    </button>
+                                                    <?php $tIsOrder = vpIsOrderTrx($t); $tHasPlan = (int)($t['order_plan_id'] ?? 0) > 0; ?>
+                                                    <?php if ($tIsOrder && $tHasPlan): ?>
+                                                        <button type="submit" name="status" value="approved" onclick="return confirm('Verify the payment first. Approve = deliver the license key to this customer (balance will NOT change).');" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-[10px] tracking-wider uppercase transition shadow">
+                                                            🔑 Deliver Key
+                                                        </button>
+                                                    <?php elseif ($tIsOrder): ?>
+                                                        <button type="submit" name="status" value="credit_wallet" onclick="return confirm('Old order without plan info. Add this amount to the customer wallet so they can buy again?');" class="px-3 py-1.5 bg-amber-600 hover:bg-amber-500 text-white rounded-lg font-bold text-[10px] tracking-wider uppercase transition shadow">
+                                                            💰 Credit Wallet
+                                                        </button>
+                                                    <?php else: ?>
+                                                        <button type="submit" name="status" value="approved" class="px-3 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-[10px] tracking-wider uppercase transition shadow">
+                                                            Approve
+                                                        </button>
+                                                    <?php endif; ?>
                                                     <button type="submit" name="status" value="rejected" class="px-3 py-1.5 bg-red-600 hover:bg-red-500 text-white rounded-lg font-bold text-[10px] tracking-wider uppercase transition shadow">
                                                         Reject
                                                     </button>

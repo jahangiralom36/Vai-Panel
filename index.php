@@ -810,6 +810,31 @@ if (!function_exists('sendTelegramBotNotification')) {
 // ====================================================================
 // SNZPAY AUTO-PAYMENT VERIFICATION ENGINE
 // ====================================================================
+
+// ====================================================================
+// 🛡️ ORDER / PAYMENT SAFETY HELPERS
+// ====================================================================
+if (!function_exists('vpSnzPayEnabled')) {
+    // SNZPay লাইসেন্স কি বসানো থাকলেই অটো ভেরিফাই চালু (আলাদা সুইচ লাগবে না)
+    function vpSnzPayEnabled(array $s): bool {
+        return trim((string)($s['snzpay_license_key'] ?? '')) !== '' && (string)($s['snzpay_disabled'] ?? '0') !== '1';
+    }
+}
+if (!function_exists('vpSaveManualOrder')) {
+    // ম্যানুয়াল অর্ডার: প্ল্যান/পরিমাণ সহ pending ট্রানজেকশন — অ্যাডমিন Approve করলে কি ডেলিভারি হবে, ব্যালেন্সে টাকা যোগ হবে না
+    function vpSaveManualOrder(PDO $pdo, int $userId, int $subId, string $method, float $amountUsd, string $sender, string $trxId, int $planId, int $qty, string $coupon = ''): void {
+        $pdo->prepare("INSERT INTO transactions (user_id, method, amount, bonus_amount, sender_num, trx_id, status, subdomain_id, tx_type, order_plan_id, order_qty, order_coupon) VALUES (?, ?, ?, 0.00, ?, ?, 'pending', ?, 'order', ?, ?, ?)")
+            ->execute([$userId, $method, $amountUsd, $sender, $trxId, $subId, $planId, max(1, $qty), $coupon !== '' ? $coupon : null]);
+    }
+}
+if (!function_exists('vpRestoreStock')) {
+    function vpRestoreStock(PDO $pdo, array $ids): void {
+        $ids = array_filter(array_map('intval', $ids));
+        if (!$ids) return;
+        try { $pdo->exec("UPDATE stock_keys SET status = 'available' WHERE id IN (" . implode(',', $ids) . ")"); } catch (Throwable $e) {}
+    }
+}
+
 function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array $storeSettings): array {
     $apiUrl     = !empty($storeSettings['snzpay_api_url']) ? trim($storeSettings['snzpay_api_url']) : 'https://snzpay.digital/api/verify_payment.php';
     $licenseKey = trim($storeSettings['snzpay_license_key'] ?? '');
@@ -1481,7 +1506,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
         $unitPrice    = $totalCostUsd / max(1, $quantity);
     }
 
-    $isAutoPaymentEnforced = (($settings['auto_payment_on'] ?? '0') === '1') || (($settings['snzpay_auto_verify'] ?? '0') === '1');
+    // SNZPay লাইসেন্স কি দিলেই অটো ভেরিফাই চালু
+    $isAutoPaymentEnforced = vpSnzPayEnabled($settings) || (($settings['auto_payment_on'] ?? '0') === '1') || (($settings['snzpay_auto_verify'] ?? '0') === '1');
     $isVerified = false;
     $verifiedAmountBdt = $totalCostBdt;
 
@@ -1512,6 +1538,10 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
 
     if (!$isVerified && $isAutoPaymentEnforced) {
         $snzRes = verifyWithSnzPay($trxId, $methodKey, $totalCostBdt, $settings);
+        if ($snzRes['status'] === 'success' && (float)($snzRes['amount'] ?? 0) > 0 && (float)$snzRes['amount'] < ($totalCostBdt - 2.0)) {
+            echo json_encode(['status' => 'error', 'message' => 'Payment amount mismatch! Expected ৳' . number_format($totalCostBdt, 0) . ' BDT, but received ৳' . number_format((float)$snzRes['amount'], 0) . ' BDT.']);
+            exit;
+        }
         if ($snzRes['status'] === 'success') {
             $isVerified = true;
             $verifiedAmountBdt = (float)($snzRes['amount'] ?? $totalCostBdt);
@@ -1529,10 +1559,10 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
     }
 
     if (!$isVerified && !$isAutoPaymentEnforced) {
-        $amountInUsd = round($totalCostBdt / $effectiveBdtRate, 2);
+        $amountInUsd = round($totalCostBdt / $effectiveBdtRate, 4);
         try {
-            $pdo->prepare("INSERT INTO transactions (user_id, method, amount, bonus_amount, sender_num, trx_id, status, subdomain_id) VALUES (?, ?, ?, 0.00, ?, ?, 'pending', ?)")
-                ->execute([$user['id'], $methodDisplayName . ' (Manual Order)', $amountInUsd, $senderNum ?: 'N/A', $trxId, $currentSubdomainId]);
+            // 🛡️ অর্ডারের প্ল্যান/পরিমাণ সেভ হয় — অ্যাডমিন Approve করলে কি ডেলিভারি হবে (আগে ভুল করে ব্যালেন্সে টাকা যোগ হত)
+            vpSaveManualOrder($pdo, (int)$user['id'], $currentSubdomainId, $methodDisplayName . ' (Manual Order)', $amountInUsd, $senderNum ?: 'N/A', $trxId, $planId, $quantity, $vpCouponApplied['code'] ?? '');
 
             echo json_encode([
                 'status'        => 'pending_submitted',
@@ -1559,6 +1589,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
         $stockIds = array_column($stockRows, 'id');
         $inClause = implode(',', array_map('intval', $stockIds));
         $pdo->exec("UPDATE stock_keys SET status = 'used' WHERE id IN ($inClause)");
+        $stockIdsUsed  = array_map('intval', $stockIds);
         $generatedKeys = array_column($stockRows, 'license_key');
     } else {
         $apiPlanId   = (int)($plan['api_plan_id'] ?? 0);
@@ -1578,6 +1609,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
 
                 $pdo->prepare("INSERT INTO transactions (user_id, method, amount, bonus_amount, sender_num, trx_id, status, subdomain_id) VALUES (?, ?, ?, 0.00, ?, ?, 'approved', ?)")
                     ->execute([$user['id'], $methodDisplayName . ' (Refund to Main Balance)', $amountToCreditUsd, $senderNum ?: 'Trx Verified', $trxId, $currentSubdomainId]);
+                if (!empty($gwTrx['id'])) { $pdo->prepare("UPDATE gateway_transactions SET status = 'claimed' WHERE id = ?")->execute([(int)$gwTrx['id']]); }
 
                 $pdo->commit();
 
@@ -1646,6 +1678,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
         } catch (Throwable $e) {}
 
         if ($vpCouponApplied) vpRecordCouponUse($pdo, $vpCouponApplied, $currentSubdomainId, (int)$user['id'], (int)$plan['real_product_id'], $vpCouponDisc, (float)$vpOrderBdtBeforeCoupon);
+        if (!empty($gwTrx['id'])) { $pdo->prepare("UPDATE gateway_transactions SET status = 'claimed' WHERE id = ?")->execute([(int)$gwTrx['id']]); }
 
         $pdo->commit();
 
@@ -1754,7 +1787,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_add_fund')
         }
     }
 
-    $isAutoPaymentEnforced = (($settings['auto_payment_on'] ?? '0') === '1') || (($settings['snzpay_auto_verify'] ?? '0') === '1');
+    // SNZPay লাইসেন্স কি দিলেই অটো ভেরিফাই চালু
+    $isAutoPaymentEnforced = vpSnzPayEnabled($settings) || (($settings['auto_payment_on'] ?? '0') === '1') || (($settings['snzpay_auto_verify'] ?? '0') === '1');
     $autoApproved = false;
 
     try {
@@ -1780,6 +1814,16 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_add_fund')
         $snzRes = verifyWithSnzPay($trxId, $methodKey, $rawAmount, $settings);
         if ($snzRes['status'] === 'success') {
             $autoApproved = true;
+            // 🛡️ ইউজারের লেখা অ্যামাউন্ট নয় — গেটওয়েতে আসলে যত টাকা এসেছে ততটাই ব্যালেন্সে যোগ হবে
+            $paidAmt = (float)($snzRes['amount'] ?? 0);
+            if ($paidAmt > 0 && abs($paidAmt - $rawAmount) > 0.009) {
+                $rawAmount   = $paidAmt;
+                $amountInUsd = $isCrypto ? round(($rawAmount * $binanceMarketRate) / $effectiveBdtRate, 2) : round($rawAmount / $effectiveBdtRate, 2);
+                $calculatedBonus = 0.00;
+                foreach (($activeDepositBonuses ?? []) as $bTier) {
+                    if ($rawAmount >= (float)$bTier['min_deposit'] && (float)$bTier['bonus_amount'] > $calculatedBonus) $calculatedBonus = (float)$bTier['bonus_amount'];
+                }
+            }
             if (!empty($snzRes['sender']) && empty($senderNum)) {
                 $senderNum = $snzRes['sender'];
             }
@@ -1936,6 +1980,12 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
 
     $totalCost = $unitPrice * $quantity;
 
+    // 🛡️ দাম কখনো ০ বা নেগেটিভ হবে না (নেগেটিভ হলে "balance - (-x)" এ উল্টো টাকা যোগ হয়ে যেত)
+    if (!is_finite($totalCost) || $unitPrice <= 0 || $totalCost <= 0) {
+        echo json_encode(['status' => 'error', 'message' => 'This plan price is not set correctly. Please contact support.']);
+        exit;
+    }
+
     // 🎟️ কুপন ডিসকাউন্ট (BDT তে হিসাব, তারপর USD তে রূপান্তর — আগে BDT ছাড় সরাসরি USD থেকে বিয়োগ হত)
     $vpCouponApplied = null; $vpCouponDisc = 0.0; $vpOrderBdtBeforeCoupon = round($totalCost * $effectiveBdtRate, 0);
     $appliedCoupon = trim($_POST['coupon_code'] ?? '');
@@ -1953,13 +2003,14 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
     $amountInUsd  = 0.00;
 
     if ($paymentType === 'direct_deposit') {
-        $directMethod = htmlspecialchars($_POST['direct_method'] ?? 'Binance');
+        // 🛡️ BINANCE DIRECT PAY — অ্যামাউন্ট সার্ভার নিজে হিসাব করে (ব্রাউজারের পাঠানো অ্যামাউন্ট আর বিশ্বাস করা হয় না)।
+        // আগে: যাচাই ছাড়াই কি দেওয়া হত, আর ডেলিভারি ফেল করলে BDT সংখ্যাটাকে USDT ধরে ওয়ালেটে (≈১০০ গুণ) টাকা যোগ হত।
+        $directMethod = 'Binance';
         $directSender = htmlspecialchars(trim($_POST['direct_sender'] ?? ''));
-        $directTrxId  = trim(htmlspecialchars(strtoupper($_POST['direct_trx_id'] ?? '')));
-        $rawAmount    = (float)($_POST['direct_amount'] ?? 0);
+        $directTrxId  = strtoupper(preg_replace('/[^A-Za-z0-9_-]/', '', (string)($_POST['direct_trx_id'] ?? '')));
 
-        if ($rawAmount <= 0 || empty($directTrxId)) {
-            echo json_encode(['status' => 'error', 'message' => 'Please provide valid Amount and TrxID / Order ID!']);
+        if (strlen($directTrxId) < 4) {
+            echo json_encode(['status' => 'error', 'message' => 'Please enter a valid Binance Order / Transaction ID!']);
             exit;
         }
 
@@ -1970,9 +2021,31 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
             exit;
         }
 
-        $amountInUsd = ($directMethod === 'Binance') 
-            ? round(($rawAmount * $binanceMarketRate) / $effectiveBdtRate, 2)
-            : round($rawAmount / $effectiveBdtRate, 2);
+        $amountInUsd   = round($totalCost, 4);                                   // অর্ডারের আসল মূল্য (USD)
+        $rawAmount     = round($totalCost * $effectiveBdtRate, 0);               // BDT
+        $expectedUsdt  = round($rawAmount / max(1.0, $binanceMarketRate), 2);    // স্ক্রিনে যত USDT দেখানো হয়
+
+        if (vpSnzPayEnabled($settings)) {
+            $snzRes = verifyWithSnzPay($directTrxId, 'BINANCE', $expectedUsdt, $settings);
+            if ($snzRes['status'] !== 'success') {
+                echo json_encode(['status' => 'error', 'verification_failed' => true, 'message' => $snzRes['message'] ?? 'Binance payment could not be verified!']);
+                exit;
+            }
+            if ((float)($snzRes['amount'] ?? 0) + 0.01 < $expectedUsdt) {
+                echo json_encode(['status' => 'error', 'message' => 'Payment amount mismatch! Expected ' . number_format($expectedUsdt, 2) . ' USDT, received ' . number_format((float)$snzRes['amount'], 2) . ' USDT.']);
+                exit;
+            }
+        } else {
+            // অটো ভেরিফাই বন্ধ → অর্ডার অ্যাডমিনের কাছে রিভিউতে যাবে (কোনো কি বা ব্যালেন্স যোগ হবে না)
+            vpSaveManualOrder($pdo, (int)$user['id'], $currentSubdomainId, 'Binance (Manual Order)', $amountInUsd, $directSender ?: 'Binance', $directTrxId, $planId, $quantity, $vpCouponApplied['code'] ?? '');
+            echo json_encode([
+                'status'       => 'pending_submitted',
+                'message'      => 'Your Binance order has been submitted for verification. The license will be delivered as soon as admin verifies your payment.',
+                'product_name' => $productFullName,
+                'amount'       => $rawAmount
+            ]);
+            exit;
+        }
     } elseif ($paymentType === 'coins') {
         if ($coinPricePerItem <= 0) {
             echo json_encode(['status' => 'error', 'message' => 'This plan cannot be purchased with coins!']);
@@ -2019,6 +2092,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
         $stockIds = array_column($stockRows, 'id');
         $inClause = implode(',', array_map('intval', $stockIds));
         $pdo->exec("UPDATE stock_keys SET status = 'used' WHERE id IN ($inClause)");
+        $stockIdsUsed  = array_map('intval', $stockIds);
         $generatedKeys = array_column($stockRows, 'license_key');
     } else {
         $apiPlanId   = (int)($plan['api_plan_id'] ?? 0);
@@ -2080,6 +2154,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
 
             if ($stmtDeductCoins->rowCount() === 0) {
                 $pdo->rollBack();
+                vpRestoreStock($pdo, $stockIdsUsed ?? []);
                 echo json_encode(['status' => 'error', 'message' => 'Insufficient coins during checkout!']);
                 exit;
             }
@@ -2089,6 +2164,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
 
             if ($stmtDeduct->rowCount() === 0) {
                 $pdo->rollBack();
+                vpRestoreStock($pdo, $stockIdsUsed ?? []);
                 echo json_encode(['status' => 'error', 'message' => 'Insufficient balance during checkout!']);
                 exit;
             }
@@ -6443,10 +6519,14 @@ document.addEventListener('DOMContentLoaded', function() {
             if (getModalCouponCode()) formData.append('coupon_code', getModalCouponCode());
             formData.append('direct_method', 'Binance');
             formData.append('direct_trx_id', trxId);
-            formData.append('direct_amount', totalCostBdt);
             try {
                 const res = await fetch('index.php', { method: 'POST', body: formData });
                 const data = await res.json();
+                if (data.status === 'pending_submitted') {
+                    closeProductPurchaseModal();
+                    showPaymentResultPopup('pending', data);
+                    return;
+                }
                 if (data.status === 'out_of_stock_refunded') {
                     updateLiveBalance(data.remaining_balance);
                     closeProductPurchaseModal();
