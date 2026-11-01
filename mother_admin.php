@@ -278,6 +278,64 @@ if (!function_exists('vpDefaultResetProducts')) {
         ];
     }
 }
+// ====================================================================
+// 🔄 RESET API — URL + API key আসে Mother Panel (system_settings) বা config.php (RESET_API_KEY) থেকে।
+// কোডে কোনো গোপন কি রাখা হয় না। উত্তর JSON/টেক্সট যেকোনো ফরম্যাটে বোঝে।
+// ====================================================================
+if (!function_exists('vpResetApiConfig')) {
+    function vpResetApiConfig(PDO $pdo): array {
+        $cfg = [
+            'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
+            'api_key' => defined('RESET_API_KEY') ? (string)RESET_API_KEY : '',
+        ];
+        try {
+            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key')");
+            foreach (($st ? $st->fetchAll(PDO::FETCH_KEY_PAIR) : []) as $k => $v) {
+                $v = trim((string)$v);
+                if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
+                if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
+            }
+        } catch (Throwable $e) {}
+        $cfg['api_key'] = trim($cfg['api_key']);
+        return $cfg;
+    }
+}
+if (!function_exists('vpCallResetApi')) {
+    function vpCallResetApi(string $url): array {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 25,
+            CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HTTPHEADER => ['Accept: application/json'], CURLOPT_USERAGENT => 'VaiPanel-Reset/1.0',
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($err || $body === false || trim((string)$body) === '') {
+            return ['ok' => false, 'message' => 'Reset server not reachable right now. Please try again in a minute.'];
+        }
+        $body = trim((string)$body);
+        $d = json_decode($body, true);
+        $truthy = function ($v) { return $v === true || $v === 1 || (is_string($v) && in_array(strtolower(trim($v)), ['success', 'true', 'ok', '1', 'done', 'reset'], true)); };
+        if (is_array($d)) {
+            $msg = (string)($d['message'] ?? ($d['msg'] ?? ($d['data']['message'] ?? (is_string($d['error'] ?? null) ? $d['error'] : ''))));
+            $failWord = (bool)preg_match('/\b(fail|failed|error|invalid|not found|expired|denied|limit|wrong|unauthori[sz]ed|cooldown|wait)\b/i', $msg);
+            $ok = $truthy($d['status'] ?? null) || $truthy($d['success'] ?? null) || $truthy($d['result'] ?? null)
+                || (isset($d['code']) && (int)$d['code'] === 200 && !$failWord)
+                || (!$failWord && $msg !== '' && preg_match('/reset|success/i', $msg));
+            if (!empty($d['error'])) $ok = false;
+            if (in_array(strtolower((string)($d['status'] ?? '')), ['error', 'fail', 'failed', 'false'], true) || ($d['success'] ?? null) === false) $ok = false;
+            $ok = $ok && $code < 400;
+            return ['ok' => $ok, 'message' => $msg !== '' ? $msg : ($ok ? 'Reset successful' : 'Reset failed. Please check your key and try again.')];
+        }
+        // JSON নয় — সাধারণ টেক্সট উত্তর
+        $plain = mb_substr(trim(strip_tags($body)), 0, 200);
+        $ok = $code < 400 && preg_match('/success|reset/i', $plain) && !preg_match('/fail|error|invalid|not found|expired|denied/i', $plain);
+        return ['ok' => (bool)$ok, 'message' => $ok ? 'Reset successful' : ($plain !== '' ? $plain : 'Reset failed. Please try again.')];
+    }
+}
 if (!function_exists('vpGetResetProducts')) {
     function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false): array {
         $list = null;
@@ -300,6 +358,7 @@ if (!function_exists('vpGetResetProducts')) {
                 'name'    => $name,
                 'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
                 'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
+                'token'   => trim((string)($r['token'] ?? '')),
             ];
             if ($onlyEnabled && !$row['enabled']) continue;
             $out[] = $row;
@@ -943,12 +1002,43 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                 $slug = preg_replace('/[^a-z0-9-]/', '', strtolower((string)($slugs[$i] ?? '')));
                 if ($slug === '' || isset($seen[$slug])) $slug = substr(md5($nm . microtime(true) . $i), 0, 10);
                 $seen[$slug] = 1;
-                $newList[] = ['slug' => $slug, 'name' => mb_substr($nm, 0, 100), 'api_id' => max(0, (int)($apis[$i] ?? 0)), 'enabled' => isset($ens[$i]) ? 1 : 0];
+                $tok  = trim((string)(($_POST['rp_token'] ?? [])[$i] ?? ''));
+                $newList[] = ['slug' => $slug, 'name' => mb_substr($nm, 0, 100), 'api_id' => max(0, (int)($apis[$i] ?? 0)), 'enabled' => isset($ens[$i]) ? 1 : 0, 'token' => mb_substr($tok, 0, 120)];
             }
         }
         $json = json_encode($newList, JSON_UNESCAPED_UNICODE);
         $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES ('reset_api_products', ?) ON DUPLICATE KEY UPDATE setting_value = ?")->execute([$json, $json]);
         $toast = ['type' => 'success', 'msg' => 'Reset products saved (' . count($newList) . ' items)!'];
+    }
+
+    // 🔄 RESET API SETTINGS (URL + API KEY) — মেইন ও সব সাব-ডোমেইনের রিসেট এই কি দিয়ে হয়
+    if ($act === 'save_reset_api_settings') {
+        $rUrl = trim((string)($_POST['reset_api_url'] ?? ''));
+        if ($rUrl === '' || !filter_var($rUrl, FILTER_VALIDATE_URL)) $rUrl = 'https://keymanager.shop/api.php';
+        $stRs = $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?");
+        $stRs->execute(['reset_api_url', $rUrl, $rUrl]);
+        $rKey = trim((string)($_POST['reset_api_key'] ?? ''));
+        if ($rKey !== '') $stRs->execute(['reset_api_key', $rKey, $rKey]);          // খালি রাখলে আগের কি থাকবে
+        if (isset($_POST['reset_api_key_clear'])) $stRs->execute(['reset_api_key', '', '']);
+        $toast = ['type' => 'success', 'msg' => '✅ Reset API settings saved (main + all sub domains)'];
+    }
+
+    if ($act === 'test_reset_api') {
+        $cfg = vpResetApiConfig($pdo);
+        $firstId = 0;
+        foreach (vpGetResetProducts($pdo, true) as $__p) { if ((int)$__p['api_id'] > 0) { $firstId = (int)$__p['api_id']; break; } }
+        if ($cfg['api_key'] === '') {
+            $toast = ['type' => 'error', 'msg' => 'Please save the Reset API key first.'];
+        } else {
+            $r = vpCallResetApi($cfg['api_url'] . '?' . http_build_query(['action' => 'reset_key', 'api_id' => $firstId ?: 1, 'key' => 'VAIPANEL-TEST-0000', 'api_key' => $cfg['api_key']]));
+            if (preg_match('/not reachable/i', $r['message'])) {
+                $toast = ['type' => 'error', 'msg' => '❌ ' . $r['message']];
+            } elseif (preg_match('/api.?key|unauthori[sz]ed|forbidden|invalid key|access denied/i', $r['message'])) {
+                $toast = ['type' => 'error', 'msg' => '❌ API key problem: ' . $r['message']];
+            } else {
+                $toast = ['type' => 'success', 'msg' => '✅ Reset API connected (test key reply: ' . $r['message'] . ')'];
+            }
+        }
     }
 
     // 🔄 PRODUCT RESET PERMISSION TOGGLE
@@ -3381,6 +3471,25 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                     <h3 class="text-xs font-black text-emerald-400 uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-arrows-rotate"></i> RESET PAGE PRODUCTS (HWID RESET API)</h3>
                     <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">স্টোরের Reset পেজে "Step 1 — Select Product" এ এই প্রোডাক্টগুলো আসবে (মেইন + সব সাব-স্টোর)। প্রতিটার KeyManager API ID দিন। API ID 0 হলে Connect Key Manager এর ডিফল্ট API দিয়ে রিসেট হবে।</span>
                 </div>
+                <?php $rsCfg = vpResetApiConfig($pdo); $rsKeySet = $rsCfg['api_key'] !== ''; ?>
+                <form method="POST" class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800 space-y-2.5 text-xs">
+                    <input type="hidden" name="admin_action" value="save_reset_api_settings">
+                    <input type="hidden" name="active_tab" value="tab-connectkm">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <span class="text-white font-bold">🔐 Reset API (KeyManager)</span>
+                        <span class="px-2 py-0.5 rounded-lg text-[10px] font-black <?= $rsKeySet ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30' ?>"><?= $rsKeySet ? '✅ API KEY SAVED' : '❌ API KEY MISSING' ?></span>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input type="url" name="reset_api_url" value="<?= htmlspecialchars($rsCfg['api_url']) ?>" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono" placeholder="https://keymanager.shop/api.php">
+                        <input type="password" name="reset_api_key" value="" autocomplete="new-password" class="w-full bg-[#030612] border border-amber-500/40 p-2.5 rounded-lg text-amber-300 outline-none font-mono" placeholder="<?= $rsKeySet ? 'Saved (…' . htmlspecialchars(substr($rsCfg['api_key'], -4)) . ') — blank = keep' : 'Paste KeyManager api_key (keymanager_live_...)' ?>">
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="submit" class="flex-1 py-2.5 btn-cyan rounded-xl uppercase text-[11px] font-black">💾 Save Reset API</button>
+                        <button type="submit" name="admin_action" value="test_reset_api" class="px-4 py-2.5 rounded-xl bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase text-[11px] font-black">Test</button>
+                    </div>
+                    <span class="text-[10px] text-slate-500 font-sans block">রিসেট URL: <code class="text-cyan-300">?action=reset_key&amp;api_id=ID&amp;key=KEY&amp;api_key=…</code> — মেইন ও সব সাব-ডোমেইনের Reset পেজ এটা ব্যবহার করে।</span>
+                </form>
+
                 <form method="POST" class="space-y-2.5 text-xs">
                     <input type="hidden" name="admin_action" value="save_reset_api_products">
                     <input type="hidden" name="active_tab" value="tab-connectkm">
@@ -3388,9 +3497,10 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         <?php foreach ($rpEditList as $i => $rp): ?>
                             <div class="rp-edit-row grid grid-cols-12 gap-2 items-center bg-slate-900/80 p-2 rounded-xl border border-slate-800">
                                 <input type="hidden" name="rp_slug[<?= $i ?>]" value="<?= htmlspecialchars($rp['slug']) ?>">
-                                <input type="text" name="rp_name[<?= $i ?>]" value="<?= htmlspecialchars($rp['name']) ?>" placeholder="Product name" class="col-span-6 sm:col-span-6 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
-                                <input type="number" min="0" name="rp_api[<?= $i ?>]" value="<?= (int)$rp['api_id'] ?>" placeholder="API ID" title="API ID" class="col-span-3 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
-                                <label class="col-span-2 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold cursor-pointer"><input type="checkbox" name="rp_enabled[<?= $i ?>]" value="1" <?= $rp['enabled'] ? 'checked' : '' ?> class="rounded"> ON</label>
+                                <input type="text" name="rp_name[<?= $i ?>]" value="<?= htmlspecialchars($rp['name']) ?>" placeholder="Product name" class="col-span-12 sm:col-span-5 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
+                                <input type="number" min="0" name="rp_api[<?= $i ?>]" value="<?= (int)$rp['api_id'] ?>" placeholder="API ID" title="API ID" class="col-span-4 sm:col-span-2 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
+                                <input type="text" name="rp_token[<?= $i ?>]" value="<?= htmlspecialchars($rp['token'] ?? '') ?>" placeholder="token (optional)" title="Extra token (only if API needs it)" class="col-span-5 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-purple-300 outline-none font-mono text-[10px]">
+                                <label class="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold cursor-pointer"><input type="checkbox" name="rp_enabled[<?= $i ?>]" value="1" <?= $rp['enabled'] ? 'checked' : '' ?> class="rounded"> ON</label>
                                 <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 hover:text-red-300 text-sm" title="Remove">✕</button>
                             </div>
                         <?php endforeach; ?>
@@ -3407,9 +3517,10 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         const div = document.createElement('div');
                         div.className = 'rp-edit-row grid grid-cols-12 gap-2 items-center bg-slate-900/80 p-2 rounded-xl border border-emerald-500/40';
                         div.innerHTML = `<input type="hidden" name="rp_slug[${i}]" value="">
-                            <input type="text" name="rp_name[${i}]" placeholder="Product name" class="col-span-6 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
-                            <input type="number" min="0" name="rp_api[${i}]" value="0" class="col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
-                            <label class="col-span-2 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold"><input type="checkbox" name="rp_enabled[${i}]" value="1" checked class="rounded"> ON</label>
+                            <input type="text" name="rp_name[${i}]" placeholder="Product name" class="col-span-12 sm:col-span-5 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
+                            <input type="number" min="0" name="rp_api[${i}]" value="0" class="col-span-4 sm:col-span-2 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
+                            <input type="text" name="rp_token[${i}]" placeholder="token (optional)" class="col-span-5 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-purple-300 outline-none font-mono text-[10px]">
+                            <label class="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold"><input type="checkbox" name="rp_enabled[${i}]" value="1" checked class="rounded"> ON</label>
                             <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 text-sm">✕</button>`;
                         document.getElementById('rpEditRows').appendChild(div);
                         div.querySelector('input[type=text]').focus();

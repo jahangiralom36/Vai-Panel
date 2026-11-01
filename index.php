@@ -436,6 +436,65 @@ if (!function_exists('vpDefaultResetProducts')) {
         ];
     }
 }
+
+// ====================================================================
+// 🔄 RESET API — URL + API key আসে Mother Panel (system_settings) বা config.php (RESET_API_KEY) থেকে।
+// কোডে কোনো গোপন কি রাখা হয় না। উত্তর JSON/টেক্সট যেকোনো ফরম্যাটে বোঝে।
+// ====================================================================
+if (!function_exists('vpResetApiConfig')) {
+    function vpResetApiConfig(PDO $pdo): array {
+        $cfg = [
+            'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
+            'api_key' => defined('RESET_API_KEY') ? (string)RESET_API_KEY : '',
+        ];
+        try {
+            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key')");
+            foreach (($st ? $st->fetchAll(PDO::FETCH_KEY_PAIR) : []) as $k => $v) {
+                $v = trim((string)$v);
+                if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
+                if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
+            }
+        } catch (Throwable $e) {}
+        $cfg['api_key'] = trim($cfg['api_key']);
+        return $cfg;
+    }
+}
+if (!function_exists('vpCallResetApi')) {
+    function vpCallResetApi(string $url): array {
+        $ch = curl_init();
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 25,
+            CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HTTPHEADER => ['Accept: application/json'], CURLOPT_USERAGENT => 'VaiPanel-Reset/1.0',
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($err || $body === false || trim((string)$body) === '') {
+            return ['ok' => false, 'message' => 'Reset server not reachable right now. Please try again in a minute.'];
+        }
+        $body = trim((string)$body);
+        $d = json_decode($body, true);
+        $truthy = function ($v) { return $v === true || $v === 1 || (is_string($v) && in_array(strtolower(trim($v)), ['success', 'true', 'ok', '1', 'done', 'reset'], true)); };
+        if (is_array($d)) {
+            $msg = (string)($d['message'] ?? ($d['msg'] ?? ($d['data']['message'] ?? (is_string($d['error'] ?? null) ? $d['error'] : ''))));
+            $failWord = (bool)preg_match('/\b(fail|failed|error|invalid|not found|expired|denied|limit|wrong|unauthori[sz]ed|cooldown|wait)\b/i', $msg);
+            $ok = $truthy($d['status'] ?? null) || $truthy($d['success'] ?? null) || $truthy($d['result'] ?? null)
+                || (isset($d['code']) && (int)$d['code'] === 200 && !$failWord)
+                || (!$failWord && $msg !== '' && preg_match('/reset|success/i', $msg));
+            if (!empty($d['error'])) $ok = false;
+            if (in_array(strtolower((string)($d['status'] ?? '')), ['error', 'fail', 'failed', 'false'], true) || ($d['success'] ?? null) === false) $ok = false;
+            $ok = $ok && $code < 400;
+            return ['ok' => $ok, 'message' => $msg !== '' ? $msg : ($ok ? 'Reset successful' : 'Reset failed. Please check your key and try again.')];
+        }
+        // JSON নয় — সাধারণ টেক্সট উত্তর
+        $plain = mb_substr(trim(strip_tags($body)), 0, 200);
+        $ok = $code < 400 && preg_match('/success|reset/i', $plain) && !preg_match('/fail|error|invalid|not found|expired|denied/i', $plain);
+        return ['ok' => (bool)$ok, 'message' => $ok ? 'Reset successful' : ($plain !== '' ? $plain : 'Reset failed. Please try again.')];
+    }
+}
 if (!function_exists('vpGetResetProducts')) {
     function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false): array {
         $list = null;
@@ -458,6 +517,7 @@ if (!function_exists('vpGetResetProducts')) {
                 'name'    => $name,
                 'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
                 'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
+                'token'   => trim((string)($r['token'] ?? '')),
             ];
             if ($onlyEnabled && !$row['enabled']) continue;
             $out[] = $row;
@@ -2012,102 +2072,39 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
     } catch (Throwable $e) {}
     $keyRow['api_id'] = (int)$chosenReset['api_id'];
 
-    // ── API Config ──
-    $KM_API_KEY   = 'keymanager_live_0f18492c550d2e3a350c821604de9e7a';
-    $KM_BASE_URL  = 'https://keymanager.shop/api.php';
-    $PINXT_TOKEN  = 'Pinxt_X7mK9pR2vT5nL8qY3wZ6';
-
+    // ── রিসেট API কল (মেইন + সব সাব-ডোমেইন একই KeyManager রিসেট API — Mother Panel → Connect Key Manager থেকে সেট) ──
     $apiId = (int)($keyRow['api_id'] ?? 0);
 
-    // Fallback: api_id না থাকলে settings থেকে নাও (পুরনো system compatibility)
     if ($apiId <= 0) {
-        $kmUrl = trim($settings['km_api_url'] ?? '');
-        $kmKey = trim($settings['km_api_key'] ?? '');
-
-        if (!empty($kmUrl) && !empty($kmKey)) {
-            $targetEndpoint = rtrim($kmUrl, '/');
-            if (stripos($targetEndpoint, '.php') === false) {
-                $targetEndpoint .= '/api.php';
-            }
-            $ch = curl_init();
-            curl_setopt_array($ch, [
-                CURLOPT_URL            => $targetEndpoint,
-                CURLOPT_POST           => true,
-                CURLOPT_POSTFIELDS     => http_build_query([
-                    'action'      => 'reset_key',
-                    'license_key' => $rawKey,
-                    'key'         => $rawKey,
-                    'api_key'     => $kmKey,
-                ]),
-                CURLOPT_RETURNTRANSFER => true,
-                CURLOPT_TIMEOUT        => 20,
-                CURLOPT_SSL_VERIFYPEER => false,
-                CURLOPT_SSL_VERIFYHOST => false,
-            ]);
-            $response = curl_exec($ch);
-            curl_close($ch);
-            $resData = json_decode($response ?: '', true);
-            if ($resData && (($resData['status'] ?? '') === 'success' || ($resData['success'] ?? false) === true)) {
-                try { $pdo->prepare("UPDATE licenses SET updated_at = NOW() WHERE id = ?")->execute([$keyRow['id']]); } catch (Throwable $e) {}
-                echo json_encode(['status' => 'success', 'message' => 'Hardware ID successfully reset! You can now bind it to a new device.']);
-                exit;
-            }
+        // API ID দেওয়া নেই → এই স্টোরের Connect Key Manager দিয়ে রিসেট
+        $kmUrl = trim((string)($settings['km_api_url'] ?? ''));
+        $kmKey = trim((string)($settings['km_api_key'] ?? ''));
+        if ($kmUrl === '' || $kmKey === '') {
+            echo json_encode(['status' => 'error', 'message' => 'Reset API ID is not set for ' . $chosenReset['name'] . '. Please contact support.']);
+            exit;
         }
-        echo json_encode(['status' => 'error', 'message' => 'Reset failed. API not configured for this product. Contact support.']);
+        $endpoint = rtrim($kmUrl, '/');
+        if (stripos($endpoint, '.php') === false) $endpoint .= '/api.php';
+        $res = vpCallResetApi($endpoint . '?' . http_build_query(['action' => 'reset_key', 'key' => $rawKey, 'license_key' => $rawKey, 'api_key' => $kmKey]));
+    } else {
+        $cfg = vpResetApiConfig($pdo);
+        if ($cfg['api_key'] === '') {
+            echo json_encode(['status' => 'error', 'message' => 'Reset API key is not configured yet. Please contact support.']);
+            exit;
+        }
+        $params = ['action' => 'reset_key', 'api_id' => $apiId, 'key' => $rawKey, 'api_key' => $cfg['api_key']];
+        if (!empty($chosenReset['token'])) $params['token'] = $chosenReset['token'];
+        $res = vpCallResetApi($cfg['api_url'] . '?' . http_build_query($params));
+    }
+
+    if ($res['ok']) {
+        if (!empty($keyRow['id'])) {
+            try { $pdo->prepare("UPDATE licenses SET updated_at = NOW() WHERE id = ?")->execute([(int)$keyRow['id']]); } catch (Throwable $e) {}
+        }
+        echo json_encode(['status' => 'success', 'message' => '✅ ' . $chosenReset['name'] . ': Hardware ID reset successfully! You can now login on a new device.']);
         exit;
     }
-
-    // ── Build GET params ──
-    $params = [
-        'action'  => 'reset_key',
-        'api_id'  => $apiId,
-        'key'     => $rawKey,
-        'api_key' => $KM_API_KEY,
-    ];
-
-    // Angry Mod (Pinxt) — api_id=99 needs extra token
-    if ($apiId === 99) {
-        $params['token'] = $PINXT_TOKEN;
-    }
-
-    $finalUrl = $KM_BASE_URL . '?' . http_build_query($params);
-
-    $ch = curl_init();
-    curl_setopt_array($ch, [
-        CURLOPT_URL            => $finalUrl,
-        CURLOPT_RETURNTRANSFER => true,
-        CURLOPT_TIMEOUT        => 20,
-        CURLOPT_SSL_VERIFYPEER => false,
-        CURLOPT_SSL_VERIFYHOST => false,
-        CURLOPT_HTTPHEADER     => ['Accept: application/json'],
-    ]);
-    $response = curl_exec($ch);
-    $curlErr  = curl_error($ch);
-    curl_close($ch);
-
-    if ($curlErr || empty($response)) {
-        echo json_encode(['status' => 'error', 'message' => 'Reset API unreachable. Please try again or contact support.']);
-        exit;
-    }
-
-    $resData = json_decode($response, true);
-
-    $isSuccess = (
-        ($resData['status']  ?? '') === 'success'  ||
-        ($resData['success'] ?? false) === true     ||
-        ($resData['message'] ?? '') === 'Key reset successfully' ||
-        (isset($resData['code']) && $resData['code'] === 200)
-    );
-
-    if ($isSuccess) {
-        try { $pdo->prepare("UPDATE licenses SET updated_at = NOW() WHERE id = ?")->execute([$keyRow['id']]); } catch (Throwable $e) {}
-        echo json_encode(['status' => 'success', 'message' => 'Hardware ID successfully reset! You can now bind it to a new device.']);
-        exit;
-    }
-
-    // API returned error — forward the message
-    $errMsg = $resData['message'] ?? $resData['error'] ?? 'Reset failed. Please contact support.';
-    echo json_encode(['status' => 'error', 'message' => $errMsg]);
+    echo json_encode(['status' => 'error', 'message' => $res['message']]);
     exit;
 }
 
