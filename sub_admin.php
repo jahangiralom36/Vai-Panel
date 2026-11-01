@@ -528,6 +528,16 @@ if (!function_exists('vpAdminDeliverOrder')) {
     }
 }
 
+// 🔒 সাব-অ্যাডমিন শুধু নিজের স্টোরের ইউজার পরিবর্তন করতে পারবে
+if (!function_exists('vpSubOwnsUser')) {
+    function vpSubOwnsUser(PDO $pdo, int $userId, int $subId, string $slug): bool {
+        if ($userId <= 0 || $subId <= 0) return false;
+        $st = $pdo->prepare("SELECT 1 FROM users WHERE id = ? AND (subdomain_id = ? OR created_by_subdomain = ?) LIMIT 1");
+        $st->execute([$userId, $subId, $slug]);
+        return (bool)$st->fetchColumn();
+    }
+}
+
 function syncTenantStackedPricesForUser(PDO $pdo, int $userId, int $subId) {
     try {
         $stmtUser = $pdo->prepare("SELECT id, role, discount_percent FROM users WHERE id = ? AND subdomain_id = ? LIMIT 1");
@@ -1295,7 +1305,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $targetUid = (int)($_POST['target_user_id'] ?? 0);
         if ($targetUid > 0) {
             $pdo->prepare("UPDATE users SET discount_percent = 0.00 WHERE id = ? AND subdomain_id = ?")->execute([$targetUid, $subadminTenantId]);
-            $pdo->prepare("DELETE FROM user_custom_prices WHERE user_id = ?")->execute([$targetUid]);
+            if (vpSubOwnsUser($pdo, $targetUid, $subadminTenantId, (string)$subadminSlug)) $pdo->prepare("DELETE FROM user_custom_prices WHERE user_id = ?")->execute([$targetUid]);
             $toast = ['type' => 'success', 'msg' => "Discount removed for this user!"];
         }
     }
@@ -1863,6 +1873,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $toast = ['type' => 'success', 'msg' => "Reseller prices saved ($changed variants updated)!"];
     }
 
+    if ($act === 'save_user_custom_pricing_and_access' && !vpSubOwnsUser($pdo, (int)($_POST['target_user_id'] ?? 0), $subadminTenantId, (string)$subadminSlug)) {
+        $toast = ['type' => 'error', 'msg' => 'This user does not belong to your store.'];
+        $act = '';
+    }
     if ($act === 'save_user_custom_pricing_and_access') {
         $userId = (int)$_POST['target_user_id'];
         $role = in_array($_POST['user_role'] ?? '', ['customer', 'reseller']) ? $_POST['user_role'] : 'customer';

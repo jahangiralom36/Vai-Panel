@@ -656,6 +656,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
             $_SESSION['user_id']           = (int)$rowUser['id'];
             $_SESSION['auth_username']     = $rowUser['username'];
             $_SESSION['auth_subdomain_id'] = $currentSubdomainId;
+            $_SESSION['vp_auth'][$currentSubdomainId] = (int)$_SESSION['auth_user_id']; // প্রতিটা স্টোরের আলাদা লগইন
 
             echo json_encode(['status' => 'success', 'message' => 'Welcome back, ' . htmlspecialchars($rowUser['username']) . '!']);
             exit;
@@ -718,6 +719,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
                 $_SESSION['user_id']           = $newId;
                 $_SESSION['auth_username']     = $cleanName;
                 $_SESSION['auth_subdomain_id'] = $currentSubdomainId;
+                $_SESSION['vp_auth'][$currentSubdomainId] = (int)$_SESSION['auth_user_id']; // প্রতিটা স্টোরের আলাদা লগইন
 
                 echo json_encode(['status' => 'success', 'message' => 'Account created on this store! Welcome, ' . $cleanName]);
                 exit;
@@ -753,6 +755,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
             $_SESSION['user_id']           = (int)$rowUser['id'];
             $_SESSION['auth_username']     = $rowUser['username'];
             $_SESSION['auth_subdomain_id'] = $currentSubdomainId;
+            $_SESSION['vp_auth'][$currentSubdomainId] = (int)$_SESSION['auth_user_id']; // প্রতিটা স্টোরের আলাদা লগইন
             $_SESSION['flash_toast']       = ['type' => 'success', 'msg' => 'Welcome back, ' . htmlspecialchars($rowUser['username']) . '!'];
             header('Location: index.php');
             exit;
@@ -841,6 +844,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
             $_SESSION['user_id']           = $newId;
             $_SESSION['auth_username']     = $username;
             $_SESSION['auth_subdomain_id'] = $currentSubdomainId;
+            $_SESSION['vp_auth'][$currentSubdomainId] = (int)$_SESSION['auth_user_id']; // প্রতিটা স্টোরের আলাদা লগইন
             $_SESSION['flash_toast']       = ['type' => 'success', 'msg' => 'Registration successful! Welcome to store.'];
             header('Location: index.php');
             exit;
@@ -855,7 +859,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
 // ====================================================================
 // 6. USER INTEGRITY & RATE RESOLUTION (STRICT DOMAIN SCOPE)
 // ====================================================================
-$userId     = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0);
+// 🔒 প্রতিটা স্টোর (মেইন/সাব-ডোমেইন) এর লগইন আলাদা — এক স্টোরে গেলে অন্য স্টোর থেকে লগআউট হবে না
+$vpAuthMap  = (isset($_SESSION['vp_auth']) && is_array($_SESSION['vp_auth'])) ? $_SESSION['vp_auth'] : [];
+$userId     = (int)($vpAuthMap[$currentSubdomainId] ?? 0);
+if ($userId <= 0) {
+    $legacySub = $_SESSION['auth_subdomain_id'] ?? null;
+    if ($legacySub === null || (int)$legacySub === $currentSubdomainId) {
+        $userId = (int)($_SESSION['auth_user_id'] ?? $_SESSION['user_id'] ?? 0);
+    }
+}
 $user       = null;
 $isLoggedIn = false;
 
@@ -877,7 +889,11 @@ if ($userId > 0) {
                 } catch (Throwable $e) {}
             }
         } else {
-            unset($_SESSION['auth_user_id'], $_SESSION['user_id'], $_SESSION['auth_username'], $_SESSION['auth_subdomain_id']);
+            // শুধু এই স্টোরের লগইন মুছবে (অন্য স্টোরের লগইন ঠিক থাকবে)
+            unset($_SESSION['vp_auth'][$currentSubdomainId]);
+            if ((int)($_SESSION['auth_subdomain_id'] ?? $currentSubdomainId) === $currentSubdomainId) {
+                unset($_SESSION['auth_user_id'], $_SESSION['user_id'], $_SESSION['auth_username'], $_SESSION['auth_subdomain_id']);
+            }
             $userId = 0;
         }
     } catch (Throwable $e) {
