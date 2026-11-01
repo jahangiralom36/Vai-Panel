@@ -817,7 +817,8 @@ if (!function_exists('sendTelegramBotNotification')) {
 if (!function_exists('vpSnzPayEnabled')) {
     // SNZPay লাইসেন্স কি বসানো থাকলেই অটো ভেরিফাই চালু (আলাদা সুইচ লাগবে না)
     function vpSnzPayEnabled(array $s): bool {
-        return trim((string)($s['snzpay_license_key'] ?? '')) !== '' && (string)($s['snzpay_disabled'] ?? '0') !== '1';
+        $k = trim((string)($s['snzpay_license_key'] ?? ''));
+        return $k !== '' && $k !== '0' && (string)($s['snzpay_disabled'] ?? '0') !== '1';
     }
 }
 if (!function_exists('vpSaveManualOrder')) {
@@ -836,7 +837,8 @@ if (!function_exists('vpRestoreStock')) {
 }
 
 function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array $storeSettings): array {
-    $apiUrl     = !empty($storeSettings['snzpay_api_url']) ? trim($storeSettings['snzpay_api_url']) : 'https://snzpay.digital/api/verify_payment.php';
+    $apiUrl     = trim((string)($storeSettings['snzpay_api_url'] ?? ''));
+    if ($apiUrl === '' || !filter_var($apiUrl, FILTER_VALIDATE_URL)) $apiUrl = 'https://snzpay.digital/api/verify_payment.php';
     $licenseKey = trim($storeSettings['snzpay_license_key'] ?? '');
 
     if (empty($licenseKey)) {
@@ -879,10 +881,10 @@ function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array
     }
 
     $result = json_decode($res ?: '', true);
-    if ($result && isset($result['status']) && $result['status'] === 'success') {
+    if (is_array($result) && ((($result['status'] ?? '') === 'success') || (($result['success'] ?? false) === true))) {
         return [
             'status'  => 'success',
-            'amount'  => (float)($result['data']['amount'] ?? $amountBdt),
+            'amount'  => (float)($result['data']['amount'] ?? ($result['amount'] ?? $amountBdt)),
             'sender'  => $result['data']['sender'] ?? '',
             'trx_id'  => $result['data']['trx_id'] ?? $cleanTrx,
             'message' => $result['message'] ?? 'Payment verified successfully by gateway.'

@@ -1595,30 +1595,32 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     // SUBDOMAIN SNZPAY AUTO-PAYMENT API RULES & TEST PING
     // ====================================================================
     if ($act === 'save_snzpay_rules') {
-        $apiUrl     = trim($_POST['snzpay_api_url'] ?? 'https://snzpay.digital/api/verify_payment.php');
+        // ⚡ লাইসেন্স কি থাকলেই অটো ভেরিফাই চালু — আলাদা সুইচ লাগবে না
         $licenseKey = trim($_POST['snzpay_license_key'] ?? '');
-        $autoVerify = isset($_POST['snzpay_auto_verify']) ? '1' : '0';
-        $autoPayOn  = isset($_POST['auto_payment_on']) ? '1' : '0';
-
-        saveTenantSetting($pdo, $subadminTenantId, 'snzpay_api_url', $apiUrl);
-        saveTenantSetting($pdo, $subadminTenantId, 'snzpay_license_key', $licenseKey);
-        saveTenantSetting($pdo, $subadminTenantId, 'snzpay_auto_verify', $autoVerify);
-        saveTenantSetting($pdo, $subadminTenantId, 'auto_payment_on', $autoPayOn);
-
-        $settings['snzpay_api_url']     = $apiUrl;
-        $settings['snzpay_license_key'] = $licenseKey;
-        $settings['snzpay_auto_verify'] = $autoVerify;
-        $settings['auto_payment_on']    = $autoPayOn;
-
-        $toast = ['type' => 'success', 'msg' => 'Store SNZPay & Auto Payment configuration saved!'];
+        $apiUrl     = trim($_POST['snzpay_api_url'] ?? '');
+        if ($apiUrl === '' || !filter_var($apiUrl, FILTER_VALIDATE_URL)) $apiUrl = 'https://snzpay.digital/api/verify_payment.php';
+        $paused     = isset($_POST['snzpay_disabled']) ? '1' : '0';
+        $on         = ($licenseKey !== '' && $paused === '0') ? '1' : '0';
+        foreach (['snzpay_license_key' => $licenseKey, 'snzpay_api_url' => $apiUrl, 'snzpay_disabled' => $paused, 'snzpay_auto_verify' => $on, 'auto_payment_on' => $on] as $__k => $__v) {
+            saveTenantSetting($pdo, $subadminTenantId, $__k, $__v);
+            $settings[$__k] = $__v;
+        }
+        $toast = ['type' => 'success', 'msg' => $on === '1' ? '✅ SNZPay saved — auto verification is ON' : ($licenseKey === '' ? 'SNZPay key removed — manual approval mode' : 'SNZPay saved (paused)')];
     }
 
     if ($act === 'test_snzpay_connection') {
-        $testRes = subadmin_snzpay_verify_payment($pdo, $subadminTenantId, "TEST_PING_" . rand(1000, 9999), "BKASH", 10.0);
-        if ($testRes['status'] === 'success') {
-            $toast = ['type' => 'success', 'msg' => "SNZPay Gateway Connected! " . $testRes['message']];
+        if (trim((string)($settings['snzpay_license_key'] ?? '')) === '') {
+            $toast = ['type' => 'error', 'msg' => 'Please save your SNZPay license key first.'];
         } else {
-            $toast = ['type' => 'error', 'msg' => "SNZPay Status: " . $testRes['message']];
+            $testRes = subadmin_snzpay_verify_payment($pdo, $subadminTenantId, "TESTPING" . rand(1000, 9999), "BKASH", 10.0);
+            $tMsg = (string)($testRes['message'] ?? '');
+            if (preg_match('/timeout|could not resolve|connection|failed to connect/i', $tMsg)) {
+                $toast = ['type' => 'error', 'msg' => '❌ SNZPay server not reachable: ' . $tMsg];
+            } elseif (preg_match('/licen[cs]e|expired|invalid key|unauthori[sz]ed|inactive/i', $tMsg)) {
+                $toast = ['type' => 'error', 'msg' => '❌ License key problem: ' . $tMsg];
+            } else {
+                $toast = ['type' => 'success', 'msg' => '✅ SNZPay connected & license accepted (test TrxID: ' . ($tMsg ?: 'OK') . ')'];
+            }
         }
     }
 
@@ -1775,7 +1777,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         ];
 
         foreach ($keys as $k) {
-            if (!array_key_exists($k, $_POST) && in_array($k, ['usdt_rate', 'inr_rate', 'binance_market_rate'], true)) continue;
+            if (!array_key_exists($k, $_POST)) continue; // 🛡️ ফর্মে না থাকা সেটিং (SNZPay key, banner URL ইত্যাদি) আর '0' দিয়ে মুছে যাবে না
             $val = trim($_POST[$k] ?? '0');
             if (in_array($k, ['usdt_rate', 'inr_rate', 'binance_market_rate'], true)) $val = (string)max(1.0, (float)$val);
             saveTenantSetting($pdo, $subadminTenantId, $k, $val);
@@ -4864,67 +4866,57 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
 
             <!-- SUB-VIEW 2: SNZPAY AUTO-PAYMENT API & STORE GATEWAY RULES -->
             <div id="view-pm-rules" class="hidden space-y-4">
+                <!-- ⚡ SNZPAY: শুধু লাইসেন্স কি বসালেই অটো ভেরিফাই চালু -->
+                <?php $snzKeySet = trim((string)($settings['snzpay_license_key'] ?? '')) !== '' && trim((string)($settings['snzpay_license_key'] ?? '')) !== '0'; $snzPaused = ($settings['snzpay_disabled'] ?? '0') === '1'; $snzOn = $snzKeySet && !$snzPaused; ?>
                 <div class="box-panel p-5 space-y-4 border-cyan-500/30 bg-gradient-to-r from-[#041a24] to-[#070d20]">
-                    <div class="flex items-center justify-between pb-3 border-b border-slate-800">
-                        <div>
+                    <div class="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+                        <div class="min-w-0">
                             <h3 class="text-xs font-black text-cyan-300 uppercase tracking-wider flex items-center gap-2">
-                                <i class="fa-solid fa-bolt-lightning text-amber-400 text-sm"></i> STORE SNZPAY AUTO-VERIFICATION API
+                                <i class="fa-solid fa-bolt-lightning text-amber-400 text-sm"></i> STORE SNZPAY AUTO PAYMENT VERIFY
                             </h3>
-                            <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">
-                                Connect snzpay.digital license key for 100% automated instant verification of your store's bKash, Nagad &amp; Rocket TrxIDs!
-                            </span>
+                            <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">শুধু SNZPay লাইসেন্স কি বসিয়ে Save করুন — bKash, Nagad, Rocket, Binance, Bangla QR এর TrxID অটো ভেরিফাই হবে।</span>
                         </div>
-                        <span class="px-3 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider <?= ($settings['auto_payment_on'] ?? '0') === '1' ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30' ?>">
-                            <?= ($settings['auto_payment_on'] ?? '0') === '1' ? 'AUTO-PAY ACTIVE' : 'MANUAL APPROVAL' ?>
+                        <span class="px-3 py-1 rounded-xl text-[10px] font-black uppercase tracking-wider <?= $snzOn ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30' : 'bg-red-500/20 text-red-400 border border-red-500/30' ?>">
+                            <?= $snzOn ? '✅ AUTO VERIFY ON' : ($snzPaused ? '⏸ PAUSED' : 'MANUAL APPROVAL') ?>
                         </span>
                     </div>
 
-                    <form method="POST" class="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-4 text-xs">
+                    <form method="POST" class="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-3.5 text-xs">
                         <input type="hidden" name="admin_action" value="save_snzpay_rules">
                         <input type="hidden" name="active_tab" value="tab-gateways">
 
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                            <div>
-                                <label class="text-slate-300 block mb-1 font-bold">SNZPay Verification Endpoint URL</label>
-                                <input type="url" name="snzpay_api_url" value="<?= htmlspecialchars($settings['snzpay_api_url'] ?? 'https://snzpay.digital/api/verify_payment.php') ?>" required class="w-full bg-[#030612] border border-slate-800 p-3 rounded-xl text-white outline-none focus:border-cyan-400 font-mono text-xs">
-                            </div>
-                            <div>
-                                <label class="text-amber-400 block mb-1 font-bold">SNZPay Active License Key</label>
-                                <input type="text" name="snzpay_license_key" value="<?= htmlspecialchars($settings['snzpay_license_key'] ?? '') ?>" placeholder="Paste your active SNZPay license key" class="w-full bg-[#030612] border border-slate-800 p-3 rounded-xl text-amber-300 outline-none focus:border-amber-400 font-mono text-xs font-bold">
-                            </div>
+                        <div>
+                            <label class="text-amber-400 block mb-1 font-bold">🔑 SNZPay License (Brand) Key</label>
+                            <input type="text" name="snzpay_license_key" value="<?= htmlspecialchars($snzKeySet ? (string)$settings['snzpay_license_key'] : '') ?>" placeholder="Paste your active SNZPay license key" autocomplete="off" spellcheck="false" class="w-full bg-[#030612] border border-amber-500/40 p-3 rounded-xl text-amber-300 outline-none focus:border-amber-400 font-mono text-sm font-bold">
+                            <span class="text-[10px] text-slate-500 font-sans block mt-1">কি খালি রাখলে ম্যানুয়াল মোড — অর্ডার/ডিপোজিট Deposits ট্যাবে Approve করতে হবে।</span>
                         </div>
 
-                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
-                            <div class="bg-[#030612] p-3 rounded-xl border border-slate-800 flex items-center justify-between">
+                        <details class="bg-[#030612] rounded-xl border border-slate-800 p-3">
+                            <summary class="cursor-pointer text-slate-300 font-bold">⚙️ Advanced</summary>
+                            <div class="space-y-3 pt-3">
                                 <div>
-                                    <span class="text-white font-bold text-xs block">Enable Auto-Payment Gateway</span>
-                                    <span class="text-[9px] text-slate-400 font-sans">Automatically deliver products &amp; approve add-funds when TrxID matches</span>
+                                    <label class="text-slate-400 block mb-1 font-bold">API Endpoint (default ঠিক আছে)</label>
+                                    <input type="url" name="snzpay_api_url" value="<?= htmlspecialchars(($settings['snzpay_api_url'] ?? '') && $settings['snzpay_api_url'] !== '0' ? $settings['snzpay_api_url'] : 'https://snzpay.digital/api/verify_payment.php') ?>" class="w-full bg-slate-900 border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono text-xs">
                                 </div>
-                                <input type="checkbox" name="auto_payment_on" value="1" <?= ($settings['auto_payment_on'] ?? '0') === '1' ? 'checked' : '' ?> class="rounded text-emerald-500 scale-125 cursor-pointer">
+                                <label class="flex items-center justify-between gap-2 cursor-pointer">
+                                    <span><span class="text-white font-bold block">Pause auto verify</span><span class="text-[10px] text-slate-500 font-sans">কি রেখে দিয়ে সাময়িকভাবে ম্যানুয়াল মোডে নিতে চাইলে</span></span>
+                                    <input type="checkbox" name="snzpay_disabled" value="1" <?= $snzPaused ? 'checked' : '' ?> class="rounded scale-125">
+                                </label>
                             </div>
-                            <div class="bg-[#030612] p-3 rounded-xl border border-slate-800 flex items-center justify-between">
-                                <div>
-                                    <span class="text-cyan-300 font-bold text-xs block">Enforce SNZPay Realtime Verification</span>
-                                    <span class="text-[9px] text-slate-400 font-sans">Strictly reject invalid/duplicate TrxIDs directly through SNZPay API</span>
-                                </div>
-                                <input type="checkbox" name="snzpay_auto_verify" value="1" <?= ($settings['snzpay_auto_verify'] ?? '0') === '1' ? 'checked' : '' ?> class="rounded text-cyan-500 scale-125 cursor-pointer">
-                            </div>
-                        </div>
+                        </details>
 
-                        <div class="flex flex-col sm:flex-row items-center gap-2.5 pt-1">
-                            <button type="submit" class="w-full sm:flex-1 py-3 btn-cyan rounded-xl uppercase text-xs font-black tracking-wider shadow">
-                                <i class="fa-solid fa-floppy-disk mr-1"></i> SAVE SNZPAY CONFIGURATION
-                            </button>
-                    </form>
-
-                    <form method="POST" class="w-full sm:w-auto">
-                        <input type="hidden" name="admin_action" value="test_snzpay_connection">
-                        <input type="hidden" name="active_tab" value="tab-gateways">
-                        <button type="submit" class="w-full sm:w-auto py-3 px-5 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/30 hover:bg-amber-500/30 font-black uppercase text-xs transition whitespace-nowrap">
-                            <i class="fa-solid fa-satellite-dish mr-1"></i> TEST PING API
+                        <button type="submit" class="w-full py-3 btn-cyan rounded-xl uppercase text-xs font-black tracking-wider shadow">
+                            <i class="fa-solid fa-floppy-disk mr-1"></i> SAVE SNZPAY
                         </button>
                     </form>
-                        </div>
+
+                    <form method="POST">
+                        <input type="hidden" name="admin_action" value="test_snzpay_connection">
+                        <input type="hidden" name="active_tab" value="tab-gateways">
+                        <button type="submit" class="w-full py-2.5 rounded-xl bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 font-black uppercase text-xs transition">
+                            <i class="fa-solid fa-satellite-dish mr-1"></i> Test License Key
+                        </button>
+                    </form>
                 </div>
 
                 <!-- Store Deposit Limits & Currency Rates Form -->
