@@ -263,6 +263,8 @@ if ($runSchemaMigrations) try {
       `admin_name` VARCHAR(150) DEFAULT 'Admin',
       `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
+    // পুরনো bot_admins টেবিলে admin_name কলাম ছিল না (Undefined array key "admin_name" এরর) — যোগ করা হলো
+    safeAddCol($pdo, 'bot_admins', 'admin_name', "VARCHAR(150) DEFAULT 'Admin'");
 
     $pdo->exec("CREATE TABLE IF NOT EXISTS `spin_segments` (
         `id` INT AUTO_INCREMENT PRIMARY KEY,
@@ -2238,11 +2240,19 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $adminName = trim($_POST['admin_name'] ?? 'Admin');
         if (!empty($tgId)) {
             try {
-                $stmt = $pdo->prepare("INSERT INTO bot_admins (telegram_id, admin_name) VALUES (?, ?)");
-                $stmt->execute([$tgId, $adminName]);
-                $toast = ['type' => 'success', 'msg' => "Admin added!"];
+                $chkAdm = $pdo->prepare("SELECT id FROM bot_admins WHERE telegram_id = ? LIMIT 1");
+                $chkAdm->execute([$tgId]);
+                if ($chkAdm->fetch()) {
+                    $toast = ['type' => 'error', 'msg' => "Already an admin."];
+                } else {
+                    safeAddCol($pdo, 'bot_admins', 'admin_name', "VARCHAR(150) DEFAULT 'Admin'");
+                    $stmt = $pdo->prepare("INSERT INTO bot_admins (telegram_id, admin_name) VALUES (?, ?)");
+                    $stmt->execute([$tgId, $adminName !== '' ? $adminName : 'Admin']);
+                    $toast = ['type' => 'success', 'msg' => "Admin added!"];
+                }
             } catch (Throwable $e) {
-                $toast = ['type' => 'error', 'msg' => "Already an admin."];
+                ma_log_error('add_bot_admin: ' . $e->getMessage());
+                $toast = ['type' => 'error', 'msg' => "Could not add admin: " . $e->getMessage()];
             }
         }
     }
@@ -3918,8 +3928,8 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         <div class="bg-slate-900/60 p-3 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
                             <div class="flex items-center space-x-2.5">
                                 <i class="fa-solid fa-shield text-cyan-400"></i>
-                                <span class="text-white font-sans font-bold"><?= htmlspecialchars($adm['admin_name']) ?></span>
-                                <span class="text-slate-400 text-xs">#<?= htmlspecialchars($adm['telegram_id']) ?></span>
+                                <span class="text-white font-sans font-bold"><?= htmlspecialchars((string)($adm['admin_name'] ?? '') ?: 'Admin') ?></span>
+                                <span class="text-slate-400 text-xs">#<?= htmlspecialchars((string)($adm['telegram_id'] ?? '')) ?></span>
                             </div>
                             <?php if ($adm['telegram_id'] === $mainOwnerId): ?>
                                 <span class="text-slate-500 text-xs font-bold">OWNER</span>
@@ -5291,7 +5301,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                         <a href="//<?= htmlspecialchars($sd['subdomain']) ?>.<?= $currentHost ?>" target="_blank" class="font-bold text-cyan-300 hover:underline text-sm">
                                             <?= htmlspecialchars($sd['subdomain']) ?>.<?= $currentHost ?>
                                         </a>
-                                        <span class="text-[10px] text-slate-400 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800"><?= htmlspecialchars($sd['site_title']) ?></span>
+                                        <span class="text-[10px] text-slate-400 font-bold bg-slate-900 px-2 py-0.5 rounded border border-slate-800"><?= htmlspecialchars((string)($sd['site_title'] ?? '') ?: 'No Title') ?></span>
                                     </div>
                                     <div class="flex items-center space-x-2 mt-1.5 font-mono text-[11px]">
                                         <span class="text-amber-400">User: <strong><?= htmlspecialchars($sd['admin_username'] ?? 'Not Set') ?></strong></span>
