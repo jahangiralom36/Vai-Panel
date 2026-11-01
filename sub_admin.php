@@ -25,215 +25,10 @@ if (!is_dir($bannerUploadDir))  @mkdir($bannerUploadDir, 0755, true);
 if (!is_dir($siteUploadDir))    @mkdir($siteUploadDir, 0755, true);
 if (!is_dir($gatewayUploadDir)) @mkdir($gatewayUploadDir, 0755, true);
 
-function safeAddCol(PDO $pdo, string $table, string $column, string $type) {
-    try {
-        $pdo->exec("ALTER TABLE `$table` ADD COLUMN `$column` $type");
-    } catch (Throwable $e) {}
-}
-
 // ====================================================================
-// CORE DATABASE AUTO-MIGRATIONS FOR ISOLATED TENANT
+// 🗄️ DATABASE: সব টেবিল/কলাম এখন database.sql ফাইলে (phpMyAdmin → Import)।
+// কোডে আর কোনো CREATE/ALTER TABLE নেই — প্রতি রিকোয়েস্টে ডাটাবেজ চেক হয় না, তাই আরও দ্রুত।
 // ====================================================================
-// ⚡ SPEED: migrations run only once after this file changes (not on every click)
-$__schemaFlagDir  = __DIR__ . '/uploads/';
-if (!is_dir($__schemaFlagDir)) @mkdir($__schemaFlagDir, 0755, true);
-$__schemaFlagFile = $__schemaFlagDir . '.schema_subadmin_' . (int)@filemtime(__FILE__) . '.flag';
-$runSchemaMigrations = !is_file($__schemaFlagFile) || isset($_GET['run_migrations']);
-
-if ($runSchemaMigrations) try {
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `subdomain_settings` (
-      `subdomain_id` INT NOT NULL,
-      `setting_key` VARCHAR(100) NOT NULL,
-      `setting_value` TEXT NULL,
-      PRIMARY KEY (`subdomain_id`, `setting_key`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `subdomain_spin_segments` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `subdomain_id` INT NOT NULL,
-      `title` VARCHAR(150) NOT NULL,
-      `spend_target` DECIMAL(12,2) NOT NULL DEFAULT 500,
-      `bonus_amount` DECIMAL(12,2) NOT NULL DEFAULT 50,
-      `probability` INT NOT NULL DEFAULT 20,
-      `color` VARCHAR(30) NOT NULL DEFAULT '#d946ef',
-      `is_active` TINYINT NOT NULL DEFAULT 1,
-      `sort_order` INT NOT NULL DEFAULT 0
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    // সাব-ডোমেইন কুপন টেবিল
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `coupons` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `subdomain_id` INT NOT NULL DEFAULT 0,
-      `code` VARCHAR(50) NOT NULL,
-      `discount_type` ENUM('percent', 'fixed') NOT NULL DEFAULT 'percent',
-      `discount_value` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-      `target_type` ENUM('all', 'specific') NOT NULL DEFAULT 'all',
-      `product_ids` TEXT NULL,
-      `min_spend` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-      `expiry_date` DATE NULL,
-      `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    safeAddCol($pdo, 'products', 'maintenance_msg', 'TEXT NULL');
-    safeAddCol($pdo, 'products', 'is_maintenance', 'TINYINT(1) NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'products', 'reset_enabled', 'TINYINT(1) NOT NULL DEFAULT 1');
-    safeAddCol($pdo, 'products', 'km_api_id', 'INT NOT NULL DEFAULT 0');
-    // 🎟️ COUPON ENGINE v2 কলাম
-    safeAddCol($pdo, 'coupons', 'max_uses', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'coupons', 'used_count', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'coupons', 'per_user_limit', 'INT NOT NULL DEFAULT 1');
-    safeAddCol($pdo, 'coupons', 'starts_at', 'DATETIME NULL');
-    safeAddCol($pdo, 'coupons', 'expires_at', 'DATETIME NULL');
-    safeAddCol($pdo, 'coupons', 'max_discount', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00');
-    safeAddCol($pdo, 'coupons', 'user_role', "VARCHAR(20) NOT NULL DEFAULT 'all'");
-    safeAddCol($pdo, 'coupons', 'title', 'VARCHAR(150) NULL');
-    try { $pdo->exec("CREATE TABLE IF NOT EXISTS `coupon_usages` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `coupon_id` INT NOT NULL,
-      `subdomain_id` INT NOT NULL DEFAULT 0,
-      `user_id` INT NOT NULL,
-      `product_id` INT NULL,
-      `discount_bdt` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-      `order_total_bdt` DECIMAL(12,2) NOT NULL DEFAULT 0.00,
-      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      INDEX `idx_cu_coupon_user` (`coupon_id`, `user_id`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;"); } catch (Throwable $e) {}
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `subdomain_deposit_bonuses` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `subdomain_id` INT NOT NULL,
-      `min_deposit` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-      `bonus_amount` DECIMAL(10,2) NOT NULL DEFAULT 0.00,
-      `bonus_type` ENUM('fixed', 'percentage') NOT NULL DEFAULT 'fixed',
-      `title` VARCHAR(191) NOT NULL DEFAULT 'Instant Bonus',
-      `claim_limit` INT NOT NULL DEFAULT 0,
-      `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-      `sort_order` INT NOT NULL DEFAULT 0,
-      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `subdomain_admins` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `subdomain_id` INT NOT NULL,
-      `telegram_id` VARCHAR(50) NOT NULL,
-      `admin_name` VARCHAR(150) DEFAULT 'Admin',
-      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      UNIQUE KEY `sub_tg_unique` (`subdomain_id`, `telegram_id`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `user_custom_prices` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `user_id` INT NOT NULL,
-      `plan_id` INT NOT NULL,
-      `custom_price` DECIMAL(10,2) NOT NULL,
-      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-      INDEX `idx_user_plan` (`user_id`, `plan_id`)
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    // Dynamic Payment Methods Table (Full Subdomain Isolation)
-    $pdo->exec("CREATE TABLE IF NOT EXISTS `payment_methods` (
-      `id` INT AUTO_INCREMENT PRIMARY KEY,
-      `subdomain_id` INT NOT NULL DEFAULT 0,
-      `method_key` VARCHAR(50) NOT NULL,
-      `name` VARCHAR(100) NOT NULL,
-      `account_number` VARCHAR(100) NOT NULL,
-      `account_type` VARCHAR(50) NOT NULL DEFAULT 'Personal',
-      `logo_url` TEXT NULL,
-      `banner_url` TEXT NULL,
-      `qr_image_url` TEXT NULL,
-      `instructions` TEXT NULL,
-      `is_active` TINYINT(1) NOT NULL DEFAULT 1,
-      `allow_add_fund` TINYINT(1) NOT NULL DEFAULT 1,
-      `allow_checkout` TINYINT(1) NOT NULL DEFAULT 1,
-      `sort_order` INT NOT NULL DEFAULT 0,
-      `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-    ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-    // Dynamic Schema Columns
-    safeAddCol($pdo, 'payment_methods', 'qr_image_url', 'TEXT NULL');
-    safeAddCol($pdo, 'payment_methods', 'banner_url', 'TEXT NULL');
-    safeAddCol($pdo, 'payment_methods', 'allow_add_fund', 'TINYINT(1) DEFAULT 1');
-    safeAddCol($pdo, 'payment_methods', 'allow_checkout', 'TINYINT(1) DEFAULT 1');
-
-    safeAddCol($pdo, 'products', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'products', 'app_download_url', 'TEXT NULL');
-
-    safeAddCol($pdo, 'product_plans', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'product_plans', 'regular_price', 'DECIMAL(10,2) DEFAULT 0.00');
-    safeAddCol($pdo, 'product_plans', 'discount_percent', 'DECIMAL(5,2) DEFAULT 0.00');
-    safeAddCol($pdo, 'product_plans', 'reseller_discount_percent', 'DECIMAL(5,2) DEFAULT 0.00');
-    safeAddCol($pdo, 'product_plans', 'reward_coins', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'product_plans', 'coin_price', 'INT NOT NULL DEFAULT 0');
-
-    safeAddCol($pdo, 'stock_keys', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'banners', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'system_notifications', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'users', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'users', 'discount_percent', 'DECIMAL(5,2) DEFAULT 0.00');
-    safeAddCol($pdo, 'users', 'created_by_subdomain', 'VARCHAR(100) NULL');
-    safeAddCol($pdo, 'licenses', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'licenses', 'payment_type', "VARCHAR(20) DEFAULT 'balance'");
-    safeAddCol($pdo, 'transactions', 'subdomain_id', 'INT NOT NULL DEFAULT 0');
-    safeAddCol($pdo, 'transactions', 'bonus_amount', 'DECIMAL(10,2) NOT NULL DEFAULT 0.00');
-
-    safeAddCol($pdo, 'subdomains', 'apk_url', 'TEXT NULL');
-
-    // Auto populate regular_price for plans if zero
-        try {
-            $pdo->exec("UPDATE product_plans SET regular_price = user_price WHERE (regular_price IS NULL OR regular_price <= 0) AND user_price > 0");
-            $pdo->exec("UPDATE product_plans SET regular_price = reseller_price WHERE (regular_price IS NULL OR regular_price <= 0) AND reseller_price > 0");
-        } catch (Throwable $e) {}
-
-        // --- SUBDOMAIN ISOLATED TABLES FOR BOT, POPUPS, CATEGORIES & SUPPORT ---
-        safeAddCol($pdo, 'subdomains', 'support_telegram', 'TEXT NULL');
-        safeAddCol($pdo, 'subdomains', 'support_whatsapp', 'TEXT NULL');
-
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `telegram_bot_config` (
-          `id` INT AUTO_INCREMENT PRIMARY KEY,
-          `subdomain_id` INT NOT NULL DEFAULT 0,
-          `bot_token` VARCHAR(255) NULL,
-          `chat_id` VARCHAR(100) NULL,
-          `notify_deposit` TINYINT(1) DEFAULT 1,
-          `notify_purchase` TINYINT(1) DEFAULT 1,
-          `notify_failed` TINYINT(1) DEFAULT 1,
-          `is_active` TINYINT(1) DEFAULT 1,
-          `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-          UNIQUE KEY `uniq_subdomain` (`subdomain_id`)
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `custom_popups` (
-          `id` INT AUTO_INCREMENT PRIMARY KEY,
-          `subdomain_id` INT NOT NULL DEFAULT 0,
-          `title` VARCHAR(191) NULL,
-          `message` TEXT NULL,
-          `image_url` TEXT NULL,
-          `link_url` TEXT NULL,
-          `link_text` VARCHAR(100) DEFAULT 'Open Link',
-          `is_active` TINYINT(1) DEFAULT 1,
-          `show_once_per_session` TINYINT(1) DEFAULT 1,
-          `sort_order` INT DEFAULT 0,
-          `created_at` TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `product_categories` (
-          `id` INT AUTO_INCREMENT PRIMARY KEY,
-          `subdomain_id` INT NOT NULL DEFAULT 0,
-          `name` VARCHAR(100) NOT NULL,
-          `icon` VARCHAR(50) NULL,
-          `sort_order` INT DEFAULT 0,
-          `is_active` TINYINT(1) DEFAULT 1
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-        $pdo->exec("CREATE TABLE IF NOT EXISTS `referral_settings` (
-          `subdomain_id` INT NOT NULL PRIMARY KEY,
-          `token_per_referral` INT DEFAULT 10,
-          `referrer_bonus_bdt` DECIMAL(10,2) DEFAULT 0.00,
-          `is_active` TINYINT(1) DEFAULT 1
-        ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;");
-
-        @file_put_contents($__schemaFlagFile, date('c'), LOCK_EX);
-    } catch (Throwable $e) {}
 
 // ====================================================================
 // SUBDOMAIN TENANT IDENTIFIER & LOGIN AUTHENTICATION
@@ -406,6 +201,13 @@ $subadminSlug     = $_SESSION['subadmin_subdomain'] ?? $detectedSubdomain;
 
 if (!$activeTenant && $subadminTenantId > 0) {
     $activeTenant = $pdo->query("SELECT * FROM subdomains WHERE id = $subadminTenantId LIMIT 1")->fetch(PDO::FETCH_ASSOC);
+}
+
+// ০% ডিসকাউন্ট ফিক্স: regular_price ০ থাকলে ঠিক করা (শুধু এই স্টোরের প্ল্যান)
+if ($subadminTenantId > 0) {
+    try {
+        $pdo->prepare("UPDATE product_plans SET regular_price = user_price WHERE (regular_price IS NULL OR regular_price <= 0) AND user_price > 0 AND subdomain_id = ?")->execute([$subadminTenantId]);
+    } catch (Throwable $e) {}
 }
 
 // Auto-seed Payment Methods for this Subdomain if completely empty
