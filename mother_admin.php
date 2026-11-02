@@ -151,6 +151,19 @@ $productCategoriesList = $pdo->query("SELECT * FROM product_categories WHERE sub
 // ====================================================================
 // SNZPAY VERIFICATION & GATEWAY ENGINE
 // ====================================================================
+if (!function_exists('vpSnzClientName')) {
+    // SNZPay client_name: প্যানেলে দেওয়া নাম, না দিলে এই স্টোরের ডোমেইন (main / sub আলাদা)
+    function vpSnzClientName(array $s): string {
+        $n = trim((string)($s['snzpay_client_name'] ?? ''));
+        if ($n !== '' && $n !== '0') return mb_substr($n, 0, 120);
+        $h = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
+        $h = preg_replace('/:\d+$/', '', $h);
+        $h = preg_replace('/^www\./', '', $h);
+        if ($h === '' && defined('MAIN_DOMAIN')) $h = preg_replace('#^https?://#', '', rtrim((string)MAIN_DOMAIN, '/'));
+        return $h !== '' ? $h : 'vaipanel';
+    }
+}
+
 function snzpay_verify_payment(PDO $pdo, string $trxId, string $method = 'BKASH', float $amount = 0.0): array {
     global $settings;
 
@@ -170,6 +183,7 @@ function snzpay_verify_payment(PDO $pdo, string $trxId, string $method = 'BKASH'
 
     $payload = [
         "license_key" => $licenseKey,
+        "client_name" => vpSnzClientName($settings),
         "trx_id"      => $cleanTrx,
         "method"      => $cleanMethod,
         "amount"      => (float)$amount
@@ -206,7 +220,7 @@ function snzpay_verify_payment(PDO $pdo, string $trxId, string $method = 'BKASH'
         ];
     }
 
-    return ['status' => 'error', 'message' => $result['message'] ?? 'Payment verification failed at gateway.'];
+    return ['status' => 'error', 'message' => $result['reason'] ?? $result['message'] ?? 'Payment verification failed at gateway.'];
 }
 
 // ====================================================================
@@ -1434,8 +1448,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $apiUrl     = trim($_POST['snzpay_api_url'] ?? '');
         if ($apiUrl === '' || !filter_var($apiUrl, FILTER_VALIDATE_URL)) $apiUrl = 'https://snzpay.digital/api/verify_payment.php';
         $paused     = isset($_POST['snzpay_disabled']) ? '1' : '0';
+        $clientName = mb_substr(trim((string)($_POST['snzpay_client_name'] ?? '')), 0, 120);
         $on         = ($licenseKey !== '' && $paused === '0') ? '1' : '0';
-        foreach (['snzpay_license_key' => $licenseKey, 'snzpay_api_url' => $apiUrl, 'snzpay_disabled' => $paused, 'snzpay_auto_verify' => $on, 'auto_payment_on' => $on] as $__k => $__v) {
+        foreach (['snzpay_license_key' => $licenseKey, 'snzpay_api_url' => $apiUrl, 'snzpay_disabled' => $paused, 'snzpay_client_name' => $clientName, 'snzpay_auto_verify' => $on, 'auto_payment_on' => $on] as $__k => $__v) {
             $pdo->prepare("INSERT INTO system_settings (setting_key, setting_value) VALUES (?, ?) ON DUPLICATE KEY UPDATE setting_value = ?")->execute([$__k, $__v, $__v]);
             $settings[$__k] = $__v;
         }
@@ -5005,6 +5020,11 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                 <div>
                                     <label class="text-slate-400 block mb-1 font-bold">API Endpoint (default ঠিক আছে)</label>
                                     <input type="url" name="snzpay_api_url" value="<?= htmlspecialchars(($settings['snzpay_api_url'] ?? '') && $settings['snzpay_api_url'] !== '0' ? $settings['snzpay_api_url'] : 'https://snzpay.digital/api/verify_payment.php') ?>" class="w-full bg-slate-900 border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono text-xs">
+                                </div>
+                                <div>
+                                    <label class="text-slate-400 block mb-1 font-bold">Client Name (website domain / bot / app name)</label>
+                                    <input type="text" name="snzpay_client_name" value="<?= htmlspecialchars((string)($settings['snzpay_client_name'] ?? '')) ?>" placeholder="Auto: <?= htmlspecialchars(vpSnzClientName(['snzpay_client_name' => ''])) ?>" class="w-full bg-slate-900 border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono text-xs">
+                                    <span class="text-[10px] text-slate-500 font-sans">খালি রাখলে এই স্টোরের ডোমেইন অটো পাঠানো হবে।</span>
                                 </div>
                                 <label class="flex items-center justify-between gap-2 cursor-pointer">
                                     <span><span class="text-white font-bold block">Pause auto verify</span><span class="text-[10px] text-slate-500 font-sans">কি রেখে দিয়ে সাময়িকভাবে ম্যানুয়াল মোডে নিতে চাইলে</span></span>

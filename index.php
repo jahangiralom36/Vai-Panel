@@ -603,6 +603,19 @@ if (!function_exists('vpRestoreStock')) {
     }
 }
 
+if (!function_exists('vpSnzClientName')) {
+    // SNZPay client_name: প্যানেলে দেওয়া নাম, না দিলে এই স্টোরের ডোমেইন (main / sub আলাদা)
+    function vpSnzClientName(array $s): string {
+        $n = trim((string)($s['snzpay_client_name'] ?? ''));
+        if ($n !== '' && $n !== '0') return mb_substr($n, 0, 120);
+        $h = strtolower((string)($_SERVER['HTTP_HOST'] ?? ''));
+        $h = preg_replace('/:\d+$/', '', $h);
+        $h = preg_replace('/^www\./', '', $h);
+        if ($h === '' && defined('MAIN_DOMAIN')) $h = preg_replace('#^https?://#', '', rtrim((string)MAIN_DOMAIN, '/'));
+        return $h !== '' ? $h : 'vaipanel';
+    }
+}
+
 function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array $storeSettings): array {
     $apiUrl     = trim((string)($storeSettings['snzpay_api_url'] ?? ''));
     if ($apiUrl === '' || !filter_var($apiUrl, FILTER_VALIDATE_URL)) $apiUrl = 'https://snzpay.digital/api/verify_payment.php';
@@ -622,6 +635,7 @@ function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array
 
     $payload = [
         "license_key" => $licenseKey,
+        "client_name" => vpSnzClientName($storeSettings),
         "trx_id"      => $cleanTrx,
         "method"      => $cleanMethod,
         "amount"      => (float)$amountBdt
@@ -660,7 +674,7 @@ function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array
 
     return [
         'status'  => 'error',
-        'message' => $result['message'] ?? ($result['error'] ?? 'Transaction ID verification failed at gateway! Please check your SMS.')
+        'message' => $result['reason'] ?? $result['message'] ?? ($result['error'] ?? 'Transaction ID verification failed at gateway! Please check your SMS.')
     ];
 }
 
