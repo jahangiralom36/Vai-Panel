@@ -4125,9 +4125,9 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                     <?php endif; ?>
                     </div>
 
-                    <?php if (count($topBuyers) > 3): ?>
-                        <div class="flex justify-end pt-1">
-                            <button type="button" onclick="toggleMoreHistory('top_buyers', this)" class="px-3 py-1 rounded-xl bg-[#090317] border border-cyan-500/40 text-cyan-300 hover:text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-sm">
+                    <?php if (true): ?>
+                        <div id="moreWrapTopBuyers" class="flex justify-end pt-1 <?= count($topBuyers) > 3 ? '' : 'hidden' ?>">
+                            <button type="button" id="moreBtnTopBuyers" onclick="toggleMoreHistory('top_buyers')" class="px-3 py-1 rounded-xl bg-[#090317] border border-cyan-500/40 text-cyan-300 hover:text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-sm">
                                 <span>More</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>
                             </button>
                         </div>
@@ -4180,9 +4180,9 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                     <?php endif; ?>
                     </div>
 
-                    <?php if (count($recentOrdersList) > 3): ?>
-                        <div class="flex justify-end pt-1">
-                            <button type="button" onclick="toggleMoreHistory('recent_orders', this)" class="px-3 py-1 rounded-xl bg-[#090317] border border-cyan-500/40 text-cyan-300 hover:text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-sm">
+                    <?php if (true): ?>
+                        <div id="moreWrapRecentOrders" class="flex justify-end pt-1 <?= count($recentOrdersList) > 3 ? '' : 'hidden' ?>">
+                            <button type="button" id="moreBtnRecentOrders" onclick="toggleMoreHistory('recent_orders')" class="px-3 py-1 rounded-xl bg-[#090317] border border-cyan-500/40 text-cyan-300 hover:text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-sm">
                                 <span>More</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>
                             </button>
                         </div>
@@ -5540,27 +5540,34 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
             }
         }
 
-        function toggleMoreHistory(type, btn) {
-            if (type === 'top_buyers') {
-                isTopBuyersExpanded = !isTopBuyersExpanded;
-                document.querySelectorAll('.extra-top-buyer').forEach(el => {
-                    if (isTopBuyersExpanded) el.classList.remove('hidden');
-                    else el.classList.add('hidden');
-                });
-                btn.innerHTML = isTopBuyersExpanded 
-                    ? `<span>Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>` 
-                    : `<span>More</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`;
-            } else {
-                isRecentOrdersExpanded = !isRecentOrdersExpanded;
-                document.querySelectorAll('.extra-recent-order').forEach(el => {
-                    if (isRecentOrdersExpanded) el.classList.remove('hidden');
-                    else el.classList.add('hidden');
-                });
-                btn.innerHTML = isRecentOrdersExpanded 
-                    ? `<span>Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>` 
-                    : `<span>More</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`;
-            }
+        // 📋 হিস্টোরি: সবসময় প্রথম ৩টা দেখাবে; বাকিগুলো "More" চাপলে। নতুন অর্ডার এলে উপরের ৩টা আপডেট হয়।
+        const VP_HIST_LIMIT = 3;
+        const VP_HIST = {
+            top_buyers:    { list: 'topBuyersListContainer',   wrap: 'moreWrapTopBuyers',    btn: 'moreBtnTopBuyers' },
+            recent_orders: { list: 'recentOrdersListContainer', wrap: 'moreWrapRecentOrders', btn: 'moreBtnRecentOrders' }
+        };
+        function applyHistoryVisibility(type) {
+            const cfg = VP_HIST[type]; if (!cfg) return;
+            const box = document.getElementById(cfg.list); if (!box) return;
+            const expanded = (type === 'top_buyers') ? isTopBuyersExpanded : isRecentOrdersExpanded;
+            const rows = Array.from(box.children).filter(el => el.classList.contains('b-member-card'));
+            rows.forEach((row, i) => row.classList.toggle('hidden', i >= VP_HIST_LIMIT && !expanded));
+            const extra = Math.max(0, rows.length - VP_HIST_LIMIT);
+            const wrap = document.getElementById(cfg.wrap);
+            if (wrap) wrap.classList.toggle('hidden', extra === 0);
+            const btn = document.getElementById(cfg.btn);
+            if (btn) btn.innerHTML = expanded
+                ? `<span>Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>`
+                : `<span>More (+${extra})</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`;
         }
+        function toggleMoreHistory(type) {
+            if (type === 'top_buyers') isTopBuyersExpanded = !isTopBuyersExpanded;
+            else isRecentOrdersExpanded = !isRecentOrdersExpanded;
+            applyHistoryVisibility(type);
+        }
+        function vpEsc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+        function vpSafeImg(u) { u = String(u || ''); return /^(https?:\/\/|uploads\/|\/)[^"'<>\s]+$/i.test(u) ? u : ''; }
+        let vpHistSig = { top_buyers: null, recent_orders: null };
 
         // লাইভ অটো-সিঙ্ক: প্রতি ৭ সেকেন্ড পর ব্যাকগ্রাউন্ডে চেক করে নতুন অর্ডার সরাসরি আপডেট করবে
         function maskNameJS(name) {
@@ -5581,29 +5588,32 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
 
                     // আপডেট রিসেন্ট অর্ডার লিস্ট
                     const roContainer = document.getElementById('recentOrdersListContainer');
-                    if (roContainer && data.recent_orders && data.recent_orders.length > 0) {
+                    const roSig = JSON.stringify(data.recent_orders || []);
+                    if (roContainer && data.recent_orders && data.recent_orders.length > 0 && roSig !== vpHistSig.recent_orders) {
+                        vpHistSig.recent_orders = roSig;
                         let roHtml = '';
                         data.recent_orders.forEach((ro, i) => {
-                            const isHidden = (!isRecentOrdersExpanded && i >= 3) ? 'hidden extra-recent-order' : 'extra-recent-order';
+                            const isHidden = (!isRecentOrdersExpanded && i >= VP_HIST_LIMIT) ? 'hidden' : '';
                             const paidVal = Math.round((parseFloat(ro.price) || 0) * rate);
-                            const letter = (ro.username || 'U').charAt(0).toUpperCase();
-                            const hasPhoto = (ro.avatar_url && ro.avatar_url.length > 15);
+                            const letter = vpEsc((ro.username || 'U').charAt(0).toUpperCase());
+                            const roImg = vpSafeImg(ro.avatar_url);
+                            const hasPhoto = roImg.length > 15;
                             
                             roHtml += `
                                 <div class="b-member-card ${isHidden}">
                                     <div class="flex items-center space-x-3">
                                         <div class="b-avatar border-cyan-500/60 shadow-[0_0_10px_rgba(0,245,255,0.25)] overflow-hidden">
-                                            ${hasPhoto ? `<img loading="lazy" src="${ro.avatar_url}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span class="text-cyan-300">${letter}</span>`}
+                                            ${hasPhoto ? `<img loading="lazy" src="${roImg}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span class="text-cyan-300">${letter}</span>`}
                                             <div class="b-medal-badge bg-gradient-to-tr from-cyan-400 to-blue-500 text-slate-950 shadow-[0_0_8px_rgba(0,245,255,0.6)]">
                                                 <i class="fa-solid fa-bolt"></i>
                                             </div>
                                         </div>
                                         <div>
                                             <h4 class="text-xs sm:text-sm font-extrabold text-white leading-tight">
-                                                ${maskNameJS(ro.username)}
+                                                ${vpEsc(maskNameJS(ro.username))}
                                             </h4>
                                             <span class="text-[9px] text-cyan-300/80 font-mono block mt-0.5 truncate max-w-[150px] sm:max-w-none">
-                                                ${ro.validity || 'Digital Pass'}
+                                                ${vpEsc(ro.validity || 'Digital Pass')}
                                             </span>
                                         </div>
                                     </div>
@@ -5616,30 +5626,34 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                             `;
                         });
                         roContainer.innerHTML = roHtml;
+                        applyHistoryVisibility('recent_orders');
                     }
 
                     // আপডেট টপ বায়ার লিস্ট
                     const tbContainer = document.getElementById('topBuyersListContainer');
-                    if (tbContainer && data.top_buyers && data.top_buyers.length > 0) {
+                    const tbSig = JSON.stringify(data.top_buyers || []);
+                    if (tbContainer && data.top_buyers && data.top_buyers.length > 0 && tbSig !== vpHistSig.top_buyers) {
+                        vpHistSig.top_buyers = tbSig;
                         let tbHtml = '';
                         data.top_buyers.forEach((tb, i) => {
-                            const isHidden = (!isTopBuyersExpanded && i >= 3) ? 'hidden extra-top-buyer' : 'extra-top-buyer';
+                            const isHidden = (!isTopBuyersExpanded && i >= VP_HIST_LIMIT) ? 'hidden' : '';
                             const spentVal = Math.round((parseFloat(tb.spent) || 0) * rate);
-                            const letter = (tb.username || 'U').charAt(0).toUpperCase();
-                            const hasPhoto = (tb.avatar_url && tb.avatar_url.length > 15);
+                            const letter = vpEsc((tb.username || 'U').charAt(0).toUpperCase());
+                            const tbImg = vpSafeImg(tb.avatar_url);
+                            const hasPhoto = tbImg.length > 15;
 
                             tbHtml += `
                                 <div class="b-member-card ${isHidden}">
                                     <div class="flex items-center space-x-3">
                                         <div class="b-avatar overflow-hidden">
-                                            ${hasPhoto ? `<img loading="lazy" src="${tb.avatar_url}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span>${letter}</span>`}
+                                            ${hasPhoto ? `<img loading="lazy" src="${tbImg}" class="w-full h-full object-cover rounded-full" alt="Avatar">` : `<span>${letter}</span>`}
                                             <div class="b-medal-badge">
                                                 <i class="fa-solid fa-medal"></i>
                                             </div>
                                         </div>
                                         <div>
                                             <h4 class="text-sm font-extrabold text-white leading-tight">
-                                                ${maskNameJS(tb.username)}
+                                                ${vpEsc(maskNameJS(tb.username))}
                                             </h4>
                                             <span class="inline-block px-2 py-0.5 rounded-full text-[9px] font-bold bg-emerald-500/15 text-emerald-400 border border-emerald-500/30 mt-0.5">
                                                 Top Member
@@ -5655,6 +5669,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                             `;
                         });
                         tbContainer.innerHTML = tbHtml;
+                        applyHistoryVisibility('top_buyers');
                     }
                 }
             } catch (e) {}
@@ -5663,6 +5678,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
         // অটো-সিঙ্ক প্রতি ৭ সেকেন্ড পর পর ব্যাকগ্রাউন্ডে চেক করবে
         // ⚡ SPEED: tab hidden থাকলে সার্ভারে রিকোয়েস্ট যাবে না
         setInterval(() => { if (!document.hidden) autoSyncLiveHistory(); }, 7000);
+        window.addEventListener('DOMContentLoaded', () => { applyHistoryVisibility('top_buyers'); applyHistoryVisibility('recent_orders'); });
 
         // ===================== PAYMENT RESULT POPUP =====================
         function showPaymentResultPopup(type, data) {
