@@ -268,9 +268,97 @@ $maintenanceTgLink = !empty($settings['maintenance_telegram_link'])
 
 $effectiveTutorialLink = $tenantTelegram;
 
+// 🔐 মেইন স্টোরের Firebase/Google কনফিগ (সাব-ডোমেইনে নিজের না থাকলে এটা দিয়ে Gmail লগইন হয়)
+$mainFirebaseCfg = [];
+try {
+    $stMF = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('firebase_api_key','firebase_auth_domain','firebase_project_id','firebase_storage_bucket','firebase_messaging_sender_id','firebase_app_id','google_client_id')");
+    $mainFirebaseCfg = $stMF ? $stMF->fetchAll(PDO::FETCH_KEY_PAIR) : [];
+} catch (Throwable $e) {}
+$mainHasFirebase   = !empty($mainFirebaseCfg['firebase_api_key']) && !empty($mainFirebaseCfg['firebase_project_id']);
+$vpGoogleBridgeUrl = '';
+
+// 🔐 GOOGLE LOGIN BRIDGE (শুধু মেইন ডোমেইনে): সাব-ডোমেইন থেকে খোলা ছোট উইন্ডো — এখানে Google অ্যাকাউন্ট সিলেক্ট করলে
+// যাচাইযোগ্য Firebase টোকেন শুধু সেই সাব-ডোমেইনে (যেটা থেকে খোলা হয়েছে) পাঠানো হয়।
+if (isset($_GET['vp_google_bridge']) && !$tenant) {
+    $brOrigin = (string)($_GET['origin'] ?? '');
+    $brParts  = parse_url($brOrigin);
+    $brHost   = strtolower((string)($brParts['host'] ?? ''));
+    $brOk     = false;
+    if (in_array($brParts['scheme'] ?? '', ['http', 'https'], true) && $brHost !== '' && substr($brHost, -strlen('.' . $mainDomain)) === '.' . $mainDomain) {
+        $brSlug = substr($brHost, 0, -strlen('.' . $mainDomain));
+        try {
+            $stBr = $pdo->prepare("SELECT site_title FROM subdomains WHERE LOWER(TRIM(subdomain)) = ? AND (status IS NULL OR LOWER(status) != 'suspended') LIMIT 1");
+            $stBr->execute([$brSlug]);
+            $brTitle = $stBr->fetchColumn();
+            $brOk = $brTitle !== false;
+        } catch (Throwable $e) {}
+    }
+    $brOrigin = $brOk ? (($brParts['scheme']) . '://' . $brHost . (isset($brParts['port']) ? ':' . (int)$brParts['port'] : '')) : '';
+    $brCfg = [
+        'apiKey' => $mainFirebaseCfg['firebase_api_key'] ?? '', 'authDomain' => $mainFirebaseCfg['firebase_auth_domain'] ?? '',
+        'projectId' => $mainFirebaseCfg['firebase_project_id'] ?? '', 'appId' => $mainFirebaseCfg['firebase_app_id'] ?? '',
+        'messagingSenderId' => $mainFirebaseCfg['firebase_messaging_sender_id'] ?? '', 'storageBucket' => $mainFirebaseCfg['firebase_storage_bucket'] ?? '',
+    ];
+    while (ob_get_level()) { ob_end_clean(); }
+    header('Content-Type: text/html; charset=utf-8');
+    header('X-Frame-Options: DENY');
+    ?><!DOCTYPE html>
+<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sign in with Google</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0} body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#04010a;color:#e5e7eb;font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:20px}
+  .card{width:100%;max-width:360px;background:linear-gradient(180deg,#110724,#06020c);border:1.5px solid rgba(0,245,255,.35);border-radius:22px;padding:26px 20px;text-align:center;box-shadow:0 0 24px rgba(168,85,247,.25)}
+  h1{font-size:16px;font-weight:800;color:#fff;margin-bottom:6px} p{font-size:12px;color:#a78bfa;margin-bottom:18px} .store{color:#22d3ee;font-weight:800}
+  button{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#fff;color:#1f2937;border:0;border-radius:14px;padding:14px;font-size:14px;font-weight:700;cursor:pointer}
+  button:disabled{opacity:.6} .msg{margin-top:14px;font-size:12px;min-height:16px} .err{color:#fda4af} .ok{color:#86efac}
+</style></head><body>
+<div class="card">
+  <h1>Continue with Google</h1>
+  <p>Login to <span class="store"><?= htmlspecialchars($brOk ? ((string)$brTitle ?: $brHost) : 'store') ?></span></p>
+  <?php if (!$brOk || empty($brCfg['apiKey'])): ?>
+    <div class="msg err">This login link is not valid. Please close this window and try again from the store.</div>
+  <?php else: ?>
+    <button id="g" type="button" onclick="vpGo()"><svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.66v3.05h3.87c2.26-2.09 3.67-5.17 3.67-9.15z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.87-3.05c-1.08.72-2.45 1.16-4.06 1.16-3.13 0-5.78-2.11-6.73-4.96H1.26v3.15C3.25 21.36 7.31 24 12 24z"/><path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.26C.46 8.23 0 10.06 0 12s.46 3.77 1.26 5.39l4.01-3.15z"/><path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.25 2.64 1.26 6.61l4.01 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/></svg><span>Select Google Account</span></button>
+    <div id="m" class="msg"></div>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
+    <script>
+      const VP_TARGET = <?= json_encode($brOrigin) ?>;
+      const m = document.getElementById('m'), b = document.getElementById('g');
+      function say(t, ok) { m.textContent = t; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
+      try { firebase.initializeApp(<?= json_encode($brCfg) ?>); } catch (e) {}
+      async function vpGo() {
+        if (!window.opener) { say('Please open this from the store login button.'); return; }
+        b.disabled = true; say('', true);
+        try {
+          const p = new firebase.auth.GoogleAuthProvider();
+          p.addScope('email'); p.addScope('profile'); p.setCustomParameters({ prompt: 'select_account' });
+          const r = await firebase.auth().signInWithPopup(p);
+          const token = await r.user.getIdToken();
+          window.opener.postMessage({ type: 'vp-google-token', idToken: token }, VP_TARGET);
+          say('✅ Done! Returning to the store…', true);
+          await firebase.auth().signOut().catch(() => {});
+          setTimeout(() => window.close(), 400);
+        } catch (e) {
+          b.disabled = false;
+          say(e && e.code === 'auth/popup-blocked' ? 'Popup blocked — please tap the button again.' : (e && e.code === 'auth/popup-closed-by-user' ? 'Cancelled. Tap the button to choose an account.' : 'Google login failed. Please try again.'));
+        }
+      }
+    </script>
+  <?php endif; ?>
+</div></body></html><?php
+    exit;
+}
+
 if ($tenant) {
     $hasTenantFirebase = !empty($settings['firebase_api_key']) && !empty($settings['firebase_project_id']);
     $isFirebaseEnabled = $hasTenantFirebase;
+    if (!$hasTenantFirebase && $mainHasFirebase) {
+        // সাব-ডোমেইন: মেইন ডোমেইনের ছোট উইন্ডোতে Google অ্যাকাউন্ট সিলেক্ট → যাচাই করা লগইন সাব-ডোমেইনে ফেরত আসে
+        $isFirebaseEnabled = true;
+        $vpScheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') ? 'https' : 'http';
+        $vpGoogleBridgeUrl = (defined('VP_MAIN_ORIGIN') ? rtrim((string)VP_MAIN_ORIGIN, '/') : $vpScheme . '://' . $mainDomain) . '/index.php?vp_google_bridge=1';
+    }
 
     $tenantSpinCount = 0;
     try {
@@ -678,6 +766,60 @@ function verifyWithSnzPay(string $trxId, string $method, float $amountBdt, array
     ];
 }
 
+
+// ====================================================================
+// 🔐 GOOGLE / FIREBASE LOGIN VERIFICATION — সার্ভার নিজে Google এর কাছে টোকেন যাচাই করে
+// (আগে ব্রাউজার থেকে আসা ইমেইল বিশ্বাস করা হত — যে কেউ অন্যের Gmail লিখে লগইন করতে পারত)
+// ====================================================================
+if (!function_exists('vpHttpJson')) {
+    function vpHttpJson(string $url, ?array $postJson = null): ?array {
+        $ch = curl_init($url);
+        $opt = [CURLOPT_RETURNTRANSFER => true, CURLOPT_CONNECTTIMEOUT => 6, CURLOPT_TIMEOUT => 12];
+        if ($postJson !== null) {
+            $opt[CURLOPT_POST] = true;
+            $opt[CURLOPT_POSTFIELDS] = json_encode($postJson);
+            $opt[CURLOPT_HTTPHEADER] = ['Content-Type: application/json'];
+        }
+        curl_setopt_array($ch, $opt);
+        $body = curl_exec($ch);
+        curl_close($ch);
+        $d = json_decode((string)$body, true);
+        return is_array($d) ? $d : null;
+    }
+}
+if (!function_exists('vpVerifyFirebaseIdToken')) {
+    // Firebase ID token → Google Identity Toolkit দিয়ে যাচাই; একাধিক প্রজেক্টের API key চেষ্টা করে (সাব-স্টোর / মেইন)
+    function vpVerifyFirebaseIdToken(string $idToken, array $apiKeys): ?array {
+        $idToken = trim($idToken);
+        if ($idToken === '' || substr_count($idToken, '.') !== 2) return null;
+        $base = defined('VP_IDTOOLKIT_URL') ? VP_IDTOOLKIT_URL : 'https://identitytoolkit.googleapis.com/v1/accounts:lookup';
+        foreach (array_unique(array_filter(array_map('trim', $apiKeys))) as $key) {
+            $d = vpHttpJson($base . '?key=' . urlencode($key), ['idToken' => $idToken]);
+            $u = $d['users'][0] ?? null;
+            if (is_array($u) && !empty($u['email'])) {
+                if (isset($u['emailVerified']) && !$u['emailVerified']) return null;
+                return ['email' => strtolower(trim($u['email'])), 'name' => (string)($u['displayName'] ?? ''), 'uid' => (string)($u['localId'] ?? '')];
+            }
+        }
+        return null;
+    }
+}
+if (!function_exists('vpVerifyGoogleCredential')) {
+    // Google Identity Services credential (JWT) → Google tokeninfo দিয়ে যাচাই
+    function vpVerifyGoogleCredential(string $jwt, string $clientId): ?array {
+        $jwt = trim($jwt);
+        if ($jwt === '' || trim($clientId) === '') return null;
+        $base = defined('VP_TOKENINFO_URL') ? VP_TOKENINFO_URL : 'https://oauth2.googleapis.com/tokeninfo';
+        $d = vpHttpJson($base . '?id_token=' . urlencode($jwt));
+        if (!$d || empty($d['email'])) return null;
+        if (($d['aud'] ?? '') !== trim($clientId)) return null;
+        if (!in_array($d['iss'] ?? '', ['accounts.google.com', 'https://accounts.google.com'], true)) return null;
+        if (!in_array((string)($d['email_verified'] ?? ''), ['true', '1'], true)) return null;
+        if (isset($d['exp']) && (int)$d['exp'] < time()) return null;
+        return ['email' => strtolower(trim($d['email'])), 'name' => (string)($d['name'] ?? ''), 'uid' => (string)($d['sub'] ?? '')];
+    }
+}
+
 // ====================================================================
 // 5. AUTHENTICATION CONTROLLER (DEFAULTS TO CUSTOMER ROLE)
 // ====================================================================
@@ -686,31 +828,24 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
     header('Content-Type: application/json; charset=utf-8');
 
     if ($_POST['auth_action'] === 'firebase_auth' || $_POST['auth_action'] === 'google_auth') {
-        $targetEmail = strtolower(trim($_POST['email'] ?? ''));
-        $targetName  = trim($_POST['name'] ?? '');
-        $firebaseUid = trim($_POST['firebase_uid'] ?? '');
-        $credential  = trim($_POST['credential'] ?? '');
-        $directEmail = strtolower(trim($_POST['direct_email'] ?? ''));
         $refCode     = trim($_POST['referral_code'] ?? '');
+        $verified    = null;
 
-        if (empty($targetEmail) && !empty($credential)) {
-            $parts = explode('.', $credential);
-            if (count($parts) === 3) {
-                $payload = json_decode(base64_decode(strtr($parts[1], '-_', '+/')), true);
-                if ($payload && !empty($payload['email'])) {
-                    $targetEmail = strtolower(trim($payload['email']));
-                    $targetName  = trim($payload['name'] ?? explode('@', $targetEmail)[0]);
-                }
-            }
-        } elseif (empty($targetEmail) && !empty($directEmail)) {
-            $targetEmail = $directEmail;
-            $targetName  = explode('@', $directEmail)[0];
+        if ($_POST['auth_action'] === 'firebase_auth') {
+            // সাব-স্টোরের নিজের Firebase থাকলে সেটা, নাহলে মেইন স্টোরের Firebase দিয়ে যাচাই
+            $verified = vpVerifyFirebaseIdToken((string)($_POST['id_token'] ?? ''), [$settings['firebase_api_key'] ?? '', $mainFirebaseCfg['firebase_api_key'] ?? '']);
+        } elseif (!empty($_POST['credential'])) {
+            $gClient = trim((string)($settings['google_client_id'] ?? '')) ?: trim((string)($mainFirebaseCfg['google_client_id'] ?? ''));
+            $verified = vpVerifyGoogleCredential((string)$_POST['credential'], $gClient);
         }
 
-        if (empty($targetEmail) || !filter_var($targetEmail, FILTER_VALIDATE_EMAIL)) {
-            echo json_encode(['status' => 'error', 'message' => 'Valid Gmail address is required!']);
+        if (!$verified || !filter_var($verified['email'], FILTER_VALIDATE_EMAIL)) {
+            echo json_encode(['status' => 'error', 'message' => 'Google login could not be verified. Please try again.']);
             exit;
         }
+        $targetEmail = $verified['email'];
+        $targetName  = $verified['name'] !== '' ? $verified['name'] : explode('@', $targetEmail)[0];
+        $firebaseUid = $verified['uid'];
 
         $stmtChk = $pdo->prepare("SELECT * FROM users WHERE email = ? AND subdomain_id = ? LIMIT 1");
         $stmtChk->execute([$targetEmail, $currentSubdomainId]);
@@ -2845,7 +2980,7 @@ try {
 $initialDeepLinkProdId = isset($_GET['prod']) ? (int)$_GET['prod'] : (isset($_GET['product']) ? (int)$_GET['product'] : 0);
 
 $firebaseClientConfig = [];
-if ($isFirebaseEnabled) {
+if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
     $firebaseClientConfig = [
         'apiKey'            => $settings['firebase_api_key'] ?? '',
         'authDomain'        => $settings['firebase_auth_domain'] ?? '',
@@ -2889,7 +3024,7 @@ if ($isFirebaseEnabled) {
 
     <!-- ⚡ SPEED: non-critical scripts no longer block page rendering -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <?php if ($isFirebaseEnabled): ?>
+    <?php if ($isFirebaseEnabled && $vpGoogleBridgeUrl === ''): ?>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js" defer></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js" defer></script>
     <?php endif; ?>
@@ -5667,53 +5802,56 @@ if ($isFirebaseEnabled) {
                 }
             }
         }
+        // 🔐 Google লগইন: সার্ভারে শুধু Google এর টোকেন যায় (ইমেইল নয়) — সার্ভার নিজে Google এ যাচাই করে
+        const VP_GOOGLE_BRIDGE = <?= json_encode($vpGoogleBridgeUrl) ?>;
+        async function vpSendGoogleToken(idToken) {
+            showToast('Verifying Google account...', 'success');
+            const formData = new FormData();
+            formData.append('auth_action', 'firebase_auth');
+            formData.append('id_token', idToken);
+            try {
+                const res = await fetch('index.php', { method: 'POST', body: formData });
+                const data = await res.json();
+                if (data.status === 'success') {
+                    showToast(data.message, 'success');
+                    setTimeout(() => window.location.reload(), 600);
+                } else showToast(data.message || 'Login failed!', 'error');
+            } catch (e) { showToast('Network error!', 'error'); }
+        }
+        function openGoogleBridge() {
+            // সাব-ডোমেইন: মেইন ডোমেইনের ছোট উইন্ডোতে অ্যাকাউন্ট সিলেক্ট
+            const w = window.open(VP_GOOGLE_BRIDGE + '&origin=' + encodeURIComponent(window.location.origin), 'vpGoogleLogin', 'width=440,height=620');
+            if (!w) { showToast('Please allow popups to continue with Google', 'error'); return; }
+            const bridgeOrigin = new URL(VP_GOOGLE_BRIDGE).origin;
+            const onMsg = (ev) => {
+                if (ev.origin !== bridgeOrigin || !ev.data || ev.data.type !== 'vp-google-token' || !ev.data.idToken) return;
+                window.removeEventListener('message', onMsg);
+                vpSendGoogleToken(ev.data.idToken);
+            };
+            window.addEventListener('message', onMsg);
+        }
         async function handleUnifiedGoogleLogin() {
+            if (VP_GOOGLE_BRIDGE) { openGoogleBridge(); return; }
             if (firebaseAuthInitialized && typeof firebase !== 'undefined' && firebase.auth) {
                 try {
                     const provider = new firebase.auth.GoogleAuthProvider();
                     provider.addScope('email'); provider.addScope('profile');
                     provider.setCustomParameters({ prompt: 'select_account' });
                     const result = await firebase.auth().signInWithPopup(provider);
-                    const user = result.user;
-                    if (user && user.email) {
-                        showToast('Verifying Google credentials...', 'success');
-                        const formData = new FormData();
-                        formData.append('auth_action', 'firebase_auth');
-                        formData.append('email', user.email.toLowerCase().trim());
-                        formData.append('name', user.displayName || '');
-                        formData.append('firebase_uid', user.uid || '');
-                        const res = await fetch('index.php', { method: 'POST', body: formData });
-                        const data = await res.json();
-                        if (data.status === 'success') {
-                            showToast(data.message, 'success');
-                            setTimeout(() => window.location.reload(), 600);
-                        } else showToast(data.message || 'Login failed!', 'error');
-                        return;
+                    if (result && result.user) {
+                        const idToken = await result.user.getIdToken();
+                        await vpSendGoogleToken(idToken);
+                        firebase.auth().signOut().catch(() => {});
                     }
-                } catch(err) {
-                    if (err.code === 'auth/popup-blocked') { showToast('Popup was blocked by browser!', 'error'); return; }
+                } catch (err) {
+                    if (err && err.code === 'auth/popup-blocked') showToast('Popup was blocked by browser! Please allow popups.', 'error');
+                    else if (err && err.code === 'auth/popup-closed-by-user') showToast('Google login cancelled.', 'error');
+                    else if (err && err.code === 'auth/unauthorized-domain') showToast('This domain is not authorized in Firebase. Please contact support.', 'error');
+                    else showToast('Google login failed. Please try again.', 'error');
                 }
+                return;
             }
-            promptDirectGmailLogin();
-        }
-        function promptDirectGmailLogin() {
-            const userEmail = prompt("Enter your Gmail address to login/register instantly:");
-            if (!userEmail) return;
-            if (!userEmail.includes('@') || !userEmail.toLowerCase().includes('.com')) {
-                showToast("Please enter a valid Gmail address!", "error"); return;
-            }
-            const formData = new FormData();
-            formData.append('auth_action', 'google_auth');
-            formData.append('direct_email', userEmail.trim().toLowerCase());
-            fetch('index.php', { method: 'POST', body: formData })
-                .then(res => res.json())
-                .then(data => {
-                    if (data.status === 'success') {
-                        showToast(data.message, 'success');
-                        setTimeout(() => window.location.reload(), 700);
-                    } else showToast(data.message || 'Login failed!', 'error');
-                })
-                .catch(() => showToast('Network error!', 'error'));
+            showToast('Google login is not available on this store. Please use username & password.', 'error');
         }
         async function handleGoogleAuthCallback(response) {
             if (!response || !response.credential) return;
