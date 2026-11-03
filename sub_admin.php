@@ -1542,12 +1542,24 @@ if (!function_exists('vpNormalizeTgLink')) {
 
     if ($act === 'save_firebase_settings') {
         $fbKeys = ['firebase_api_key', 'firebase_auth_domain', 'firebase_project_id', 'firebase_storage_bucket', 'firebase_messaging_sender_id', 'firebase_app_id'];
-        foreach ($fbKeys as $k) {
-            $val = trim($_POST[$k] ?? '');
-            saveTenantSetting($pdo, $subadminTenantId, $k, $val);
-            $settings[$k] = $val;
+        $vals = [];
+        foreach ($fbKeys as $k) $vals[$k] = trim(trim((string)($_POST[$k] ?? '')), "\"' ,;");
+        // 📋 Firebase Console থেকে পুরো config কপি-পেস্ট করলে নিজে থেকে ঘরগুলো পূরণ হবে
+        $paste = (string)($_POST['firebase_config_paste'] ?? '');
+        if (trim($paste) !== '') {
+            $map = ['apiKey' => 'firebase_api_key', 'authDomain' => 'firebase_auth_domain', 'projectId' => 'firebase_project_id', 'storageBucket' => 'firebase_storage_bucket', 'messagingSenderId' => 'firebase_messaging_sender_id', 'appId' => 'firebase_app_id'];
+            foreach ($map as $js => $k) {
+                if (preg_match('/["\']?' . $js . '["\']?\s*:\s*["\']([^"\']+)["\']/', $paste, $mm)) $vals[$k] = trim($mm[1]);
+            }
         }
-        $toast = ['type' => 'success', 'msg' => 'Firebase Web SDK Configuration Saved!'];
+        if (isset($_POST['firebase_use_main'])) { foreach ($fbKeys as $k) $vals[$k] = ''; }
+        if ($vals['firebase_auth_domain'] === '' && $vals['firebase_project_id'] !== '') $vals['firebase_auth_domain'] = $vals['firebase_project_id'] . '.firebaseapp.com';
+        foreach ($vals as $k => $val) { saveTenantSetting($pdo, $subadminTenantId, $k, $val); $settings[$k] = $val; }
+        $okCfg = $vals['firebase_api_key'] !== '' && $vals['firebase_project_id'] !== '';
+        $toast = isset($_POST['firebase_use_main'])
+            ? ['type' => 'success', 'msg' => 'Now using the main site Google login for this store.']
+            : ($okCfg ? ['type' => 'success', 'msg' => '✅ Firebase saved! Now add your store domain in Firebase → Authentication → Settings → Authorized domains.']
+                      : ['type' => 'error', 'msg' => 'apiKey and projectId are required (or paste the full firebaseConfig).']);
     }
 
     if ($act === 'save_deposit_bonus') {
@@ -3550,9 +3562,35 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                     </div>
                 </div>
 
+                <?php
+                    $fbOwn = !empty($settings['firebase_api_key']) && !empty($settings['firebase_project_id']);
+                    $fbMainDomain = defined('MAIN_DOMAIN') ? preg_replace('/^www\./', '', preg_replace('#^https?://#', '', rtrim((string)MAIN_DOMAIN, '/'))) : 'vaipanel.shop';
+                    $fbStoreDomain = strtolower((string)($activeTenant['subdomain'] ?? $subadminSlug)) . '.' . $fbMainDomain;
+                ?>
+                <div class="p-3.5 rounded-2xl border text-xs font-sans space-y-2 <?= $fbOwn ? 'border-emerald-500/30 bg-emerald-950/20' : 'border-cyan-500/30 bg-cyan-950/20' ?>">
+                    <div class="font-black <?= $fbOwn ? 'text-emerald-300' : 'text-cyan-300' ?>">
+                        <?= $fbOwn ? '✅ This store uses its OWN Firebase for Gmail login' : 'ℹ️ This store uses the MAIN site Gmail login (no setup needed)' ?>
+                    </div>
+                    <?php if ($fbOwn): ?>
+                    <ol class="list-decimal ml-4 space-y-1 text-slate-300">
+                        <li>Firebase Console → <b>Authentication → Sign-in method → Google → Enable</b></li>
+                        <li>Authentication → <b>Settings → Authorized domains → Add domain</b>: <code class="text-amber-300 select-all"><?= htmlspecialchars($fbStoreDomain) ?></code></li>
+                        <li>এই দুটো না করলে Gmail লগইন কাজ করবে না (তখন অটো মেইন সাইটের লগইন ব্যবহার হবে)।</li>
+                    </ol>
+                    <?php else: ?>
+                    <p class="text-slate-400">নিজের Firebase দিতে চাইলে নিচে config পেস্ট করে Save করুন।</p>
+                    <?php endif; ?>
+                </div>
+
                 <form method="POST" class="bg-slate-900/80 p-5 rounded-2xl border border-slate-800 space-y-4 text-xs">
                     <input type="hidden" name="admin_action" value="save_firebase_settings">
                     <input type="hidden" name="active_tab" value="tab-adminaccess">
+
+                    <div>
+                        <label class="text-amber-400 block mb-1 font-bold">📋 Paste full firebaseConfig (easiest)</label>
+                        <textarea name="firebase_config_paste" rows="4" placeholder="const firebaseConfig = {&#10;  apiKey: &quot;AIza...&quot;,&#10;  authDomain: &quot;your-project.firebaseapp.com&quot;,&#10;  projectId: &quot;your-project&quot;, ...&#10;};" class="w-full bg-[#030612] border border-amber-500/30 p-3 rounded-xl text-amber-200 font-mono outline-none text-[11px]"></textarea>
+                        <span class="text-[10px] text-slate-500 font-sans">Firebase Console → Project settings → Your apps → Web app → SDK setup → Config — পুরোটা কপি করে এখানে পেস্ট করুন।</span>
+                    </div>
 
                     <div class="grid grid-cols-1 sm:grid-cols-2 gap-3.5">
                         <div>
@@ -3590,6 +3628,9 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                     <button type="submit" class="w-full py-3.5 btn-cyan rounded-xl uppercase tracking-wider text-xs font-black shadow-md mt-2">
                         SAVE FIREBASE CONFIGURATION
                     </button>
+                    <?php if ($fbOwn): ?>
+                    <button type="submit" name="firebase_use_main" value="1" onclick="return confirm('Remove this store\'s Firebase and use the main site Gmail login?');" class="w-full py-2.5 rounded-xl bg-slate-800 text-slate-300 uppercase text-[11px] font-black">Use main site Gmail login instead</button>
+                    <?php endif; ?>
                 </form>
             </div>
         </section>

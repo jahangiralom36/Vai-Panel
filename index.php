@@ -276,6 +276,7 @@ try {
 } catch (Throwable $e) {}
 $mainHasFirebase   = !empty($mainFirebaseCfg['firebase_api_key']) && !empty($mainFirebaseCfg['firebase_project_id']);
 $vpGoogleBridgeUrl = '';
+$vpGoogleBridgeFallback = '';
 
 // 🔐 GOOGLE LOGIN BRIDGE (শুধু মেইন ডোমেইনে): সাব-ডোমেইন থেকে খোলা ছোট উইন্ডো — এখানে Google অ্যাকাউন্ট সিলেক্ট করলে
 // যাচাইযোগ্য Firebase টোকেন শুধু সেই সাব-ডোমেইনে (যেটা থেকে খোলা হয়েছে) পাঠানো হয়।
@@ -353,6 +354,11 @@ if (isset($_GET['vp_google_bridge']) && !$tenant) {
 if ($tenant) {
     $hasTenantFirebase = !empty($settings['firebase_api_key']) && !empty($settings['firebase_project_id']);
     $isFirebaseEnabled = $hasTenantFirebase;
+    if ($mainHasFirebase) {
+        // মেইন সাইটের Google লগইন — সাব-স্টোরের নিজের Firebase কাজ না করলে ব্যাকআপ হিসেবে
+        $vpScheme0 = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') ? 'https' : 'http';
+        $vpGoogleBridgeFallback = (defined('VP_MAIN_ORIGIN') ? rtrim((string)VP_MAIN_ORIGIN, '/') : $vpScheme0 . '://' . $mainDomain) . '/index.php?vp_google_bridge=1';
+    }
     if (!$hasTenantFirebase && $mainHasFirebase) {
         // সাব-ডোমেইন: মেইন ডোমেইনের ছোট উইন্ডোতে Google অ্যাকাউন্ট সিলেক্ট → যাচাই করা লগইন সাব-ডোমেইনে ফেরত আসে
         $isFirebaseEnabled = true;
@@ -2992,7 +2998,7 @@ $firebaseClientConfig = [];
 if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
     $firebaseClientConfig = [
         'apiKey'            => $settings['firebase_api_key'] ?? '',
-        'authDomain'        => $settings['firebase_auth_domain'] ?? '',
+        'authDomain'        => trim((string)($settings['firebase_auth_domain'] ?? '')) ?: (trim((string)($settings['firebase_project_id'] ?? '')) . '.firebaseapp.com'),
         'projectId'         => $settings['firebase_project_id'] ?? '',
         'storageBucket'     => $settings['firebase_storage_bucket'] ?? '',
         'messagingSenderId' => $settings['firebase_messaging_sender_id'] ?? '',
@@ -5838,6 +5844,8 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
         }
         // 🔐 Google লগইন: সার্ভারে শুধু Google এর টোকেন যায় (ইমেইল নয়) — সার্ভার নিজে Google এ যাচাই করে
         const VP_GOOGLE_BRIDGE = <?= json_encode($vpGoogleBridgeUrl) ?>;
+        const VP_GOOGLE_BRIDGE_FALLBACK = <?= json_encode($vpGoogleBridgeFallback) ?>;
+        let vpForceGoogleBridge = false;
         async function vpSendGoogleToken(idToken) {
             showToast('Verifying Google account...', 'success');
             const formData = new FormData();
@@ -5854,9 +5862,11 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
         }
         function openGoogleBridge() {
             // সাব-ডোমেইন: মেইন ডোমেইনের ছোট উইন্ডোতে অ্যাকাউন্ট সিলেক্ট
-            const w = window.open(VP_GOOGLE_BRIDGE + '&origin=' + encodeURIComponent(window.location.origin), 'vpGoogleLogin', 'width=440,height=620');
+            const bridgeUrl = VP_GOOGLE_BRIDGE || VP_GOOGLE_BRIDGE_FALLBACK;
+            if (!bridgeUrl) { showToast('Google login is not available on this store.', 'error'); return; }
+            const w = window.open(bridgeUrl + '&origin=' + encodeURIComponent(window.location.origin), 'vpGoogleLogin', 'width=440,height=620');
             if (!w) { showToast('Please allow popups to continue with Google', 'error'); return; }
-            const bridgeOrigin = new URL(VP_GOOGLE_BRIDGE).origin;
+            const bridgeOrigin = new URL(bridgeUrl).origin;
             const onMsg = (ev) => {
                 if (ev.origin !== bridgeOrigin || !ev.data || ev.data.type !== 'vp-google-token' || !ev.data.idToken) return;
                 window.removeEventListener('message', onMsg);
@@ -5865,7 +5875,8 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
             window.addEventListener('message', onMsg);
         }
         async function handleUnifiedGoogleLogin() {
-            if (VP_GOOGLE_BRIDGE) { openGoogleBridge(); return; }
+            if (VP_GOOGLE_BRIDGE || vpForceGoogleBridge) { openGoogleBridge(); return; }
+            if (!(firebaseAuthInitialized && typeof firebase !== 'undefined' && firebase.auth) && VP_GOOGLE_BRIDGE_FALLBACK) { openGoogleBridge(); return; }
             if (firebaseAuthInitialized && typeof firebase !== 'undefined' && firebase.auth) {
                 try {
                     const provider = new firebase.auth.GoogleAuthProvider();
@@ -5880,6 +5891,11 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                 } catch (err) {
                     if (err && err.code === 'auth/popup-blocked') showToast('Popup was blocked by browser! Please allow popups.', 'error');
                     else if (err && err.code === 'auth/popup-closed-by-user') showToast('Google login cancelled.', 'error');
+                    else if (VP_GOOGLE_BRIDGE_FALLBACK && err && /unauthorized-domain|operation-not-allowed|invalid-api-key|api-key-not-valid|configuration-not-found|internal-error|argument-error|network-request-failed/.test(err.code || '')) {
+                        // এই স্টোরের Firebase ঠিকমতো সেট না → মেইন সাইটের Google লগইন দিয়ে চেষ্টা
+                        vpForceGoogleBridge = true;
+                        showToast('Please tap "Continue with Google" once more to login.', 'success');
+                    }
                     else if (err && err.code === 'auth/unauthorized-domain') showToast('This domain is not authorized in Firebase. Please contact support.', 'error');
                     else showToast('Google login failed. Please try again.', 'error');
                 }
