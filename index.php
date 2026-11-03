@@ -2934,13 +2934,13 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'get_live_history_
     try {
         $stmtS1 = $pdo->prepare("SELECT u.username, u.avatar_url, SUM(l.price) as spent 
             FROM licenses l JOIN users u ON l.user_id = u.id 
-            WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 15");
+            WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 30");
         $stmtS1->execute([$currentSubdomainId]);
         $syncTop = $stmtS1->fetchAll(PDO::FETCH_ASSOC);
 
         $stmtS2 = $pdo->prepare("SELECT l.validity, l.price, l.created_at, u.username, u.avatar_url 
             FROM licenses l JOIN users u ON l.user_id = u.id 
-            WHERE l.subdomain_id = ? ORDER BY l.id DESC LIMIT 15");
+            WHERE l.subdomain_id = ? ORDER BY l.id DESC LIMIT 30");
         $stmtS2->execute([$currentSubdomainId]);
         $syncRecent = $stmtS2->fetchAll(PDO::FETCH_ASSOC);
     } catch (Throwable $e) {}
@@ -2958,7 +2958,7 @@ $topBuyers = [];
 try {
     $stmtLB = $pdo->prepare("SELECT u.username, u.avatar_url, SUM(l.price) as spent 
         FROM licenses l JOIN users u ON l.user_id = u.id 
-        WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 15");
+        WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 30");
     $stmtLB->execute([$currentSubdomainId]);
     $topBuyers = $stmtLB->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {}
@@ -2969,7 +2969,7 @@ try {
         FROM licenses l 
         JOIN users u ON l.user_id = u.id 
         WHERE l.subdomain_id = ? 
-        ORDER BY l.id DESC LIMIT 15");
+        ORDER BY l.id DESC LIMIT 30");
     $stmtRO->execute([$currentSubdomainId]);
     $recentOrdersList = $stmtRO->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {}
@@ -5558,23 +5558,29 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
             top_buyers:    { list: 'topBuyersListContainer',   wrap: 'moreWrapTopBuyers',    btn: 'moreBtnTopBuyers' },
             recent_orders: { list: 'recentOrdersListContainer', wrap: 'moreWrapRecentOrders', btn: 'moreBtnRecentOrders' }
         };
+        // প্রথমে ৩টা; প্রতিবার "More" চাপলে আরও ৫টা; সব দেখানো হলে "Less" → আবার ৩টা
+        const VP_HIST_STEP = 5;
+        const vpHistShown = { top_buyers: VP_HIST_LIMIT, recent_orders: VP_HIST_LIMIT };
         function applyHistoryVisibility(type) {
             const cfg = VP_HIST[type]; if (!cfg) return;
             const box = document.getElementById(cfg.list); if (!box) return;
-            const expanded = (type === 'top_buyers') ? isTopBuyersExpanded : isRecentOrdersExpanded;
             const rows = Array.from(box.children).filter(el => el.classList.contains('b-member-card'));
-            rows.forEach((row, i) => row.classList.toggle('hidden', i >= VP_HIST_LIMIT && !expanded));
-            const extra = Math.max(0, rows.length - VP_HIST_LIMIT);
+            const shown = Math.min(rows.length, Math.max(VP_HIST_LIMIT, vpHistShown[type] || VP_HIST_LIMIT));
+            rows.forEach((row, i) => row.classList.toggle('hidden', i >= shown));
+            const remaining = rows.length - shown;
             const wrap = document.getElementById(cfg.wrap);
-            if (wrap) wrap.classList.toggle('hidden', extra === 0);
+            if (wrap) wrap.classList.toggle('hidden', rows.length <= VP_HIST_LIMIT);
             const btn = document.getElementById(cfg.btn);
-            if (btn) btn.innerHTML = expanded
-                ? `<span>Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>`
-                : `<span>More (+${extra})</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`;
+            if (btn) btn.innerHTML = remaining > 0
+                ? `<span>More (+${Math.min(VP_HIST_STEP, remaining)})</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`
+                : `<span>Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>`;
+            if (type === 'top_buyers') isTopBuyersExpanded = shown > VP_HIST_LIMIT; else isRecentOrdersExpanded = shown > VP_HIST_LIMIT;
         }
         function toggleMoreHistory(type) {
-            if (type === 'top_buyers') isTopBuyersExpanded = !isTopBuyersExpanded;
-            else isRecentOrdersExpanded = !isRecentOrdersExpanded;
+            const cfg = VP_HIST[type]; const box = cfg && document.getElementById(cfg.list); if (!box) return;
+            const total = Array.from(box.children).filter(el => el.classList.contains('b-member-card')).length;
+            const cur = Math.min(total, vpHistShown[type] || VP_HIST_LIMIT);
+            vpHistShown[type] = (cur < total) ? Math.min(total, cur + VP_HIST_STEP) : VP_HIST_LIMIT;
             applyHistoryVisibility(type);
         }
         function vpEsc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
@@ -5605,7 +5611,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                         vpHistSig.recent_orders = roSig;
                         let roHtml = '';
                         data.recent_orders.forEach((ro, i) => {
-                            const isHidden = (!isRecentOrdersExpanded && i >= VP_HIST_LIMIT) ? 'hidden' : '';
+                            const isHidden = (i >= (vpHistShown.recent_orders || VP_HIST_LIMIT)) ? 'hidden' : '';
                             const paidVal = Math.round((parseFloat(ro.price) || 0) * rate);
                             const letter = vpEsc((ro.username || 'U').charAt(0).toUpperCase());
                             const roImg = vpSafeImg(ro.avatar_url);
@@ -5648,7 +5654,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                         vpHistSig.top_buyers = tbSig;
                         let tbHtml = '';
                         data.top_buyers.forEach((tb, i) => {
-                            const isHidden = (!isTopBuyersExpanded && i >= VP_HIST_LIMIT) ? 'hidden' : '';
+                            const isHidden = (i >= (vpHistShown.top_buyers || VP_HIST_LIMIT)) ? 'hidden' : '';
                             const spentVal = Math.round((parseFloat(tb.spent) || 0) * rate);
                             const letter = vpEsc((tb.username || 'U').charAt(0).toUpperCase());
                             const tbImg = vpSafeImg(tb.avatar_url);
