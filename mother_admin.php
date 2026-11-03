@@ -289,6 +289,7 @@ if (!function_exists('vpDefaultResetProducts')) {
             ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 4,   'enabled' => 1],
             ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 2,   'enabled' => 1],
             ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
+            ['slug' => 'crackmaster',     'name' => 'CRACK MASTER',         'api_id' => 0,  'enabled' => 1, 'provider' => 'crackmaster'],
         ];
     }
 }
@@ -301,13 +302,17 @@ if (!function_exists('vpResetApiConfig')) {
         $cfg = [
             'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
             'api_key' => defined('RESET_API_KEY') ? (string)RESET_API_KEY : '',
+            'cm_url'  => 'https://crackmaster.shop/reseller_api.php?action=reset_key',
+            'cm_key'  => defined('CRACKMASTER_API_KEY') ? (string)CRACKMASTER_API_KEY : '',
         ];
         try {
-            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key')");
+            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key')");
             foreach (($st ? $st->fetchAll(PDO::FETCH_KEY_PAIR) : []) as $k => $v) {
                 $v = trim((string)$v);
                 if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
                 if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
+                if ($k === 'crackmaster_reset_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['cm_url'] = $v;
+                if ($k === 'crackmaster_api_key' && $v !== '' && $v !== '0') $cfg['cm_key'] = $v;
             }
         } catch (Throwable $e) {}
         $cfg['api_key'] = trim($cfg['api_key']);
@@ -315,8 +320,9 @@ if (!function_exists('vpResetApiConfig')) {
     }
 }
 if (!function_exists('vpCallResetApi')) {
-    function vpCallResetApi(string $url): array {
+    function vpCallResetApi(string $url, ?array $postFields = null): array {
         $ch = curl_init();
+        if ($postFields !== null) { curl_setopt($ch, CURLOPT_POST, true); curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields); }
         curl_setopt_array($ch, [
             CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 25,
@@ -360,6 +366,13 @@ if (!function_exists('vpGetResetProducts')) {
             if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
         } catch (Throwable $e) {}
         if ($list === null) $list = vpDefaultResetProducts();
+        // পুরনো সেভ করা লিস্ট (provider ফিল্ড নেই) → Crack Master নিজে থেকে যোগ হবে
+        $hasProviderField = false;
+        foreach ($list as $__r) { if (is_array($__r) && array_key_exists('provider', $__r)) { $hasProviderField = true; break; } }
+        if (!$hasProviderField) {
+            $slugs = array_map(function ($r) { return (string)($r['slug'] ?? ''); }, $list);
+            if (!in_array('crackmaster', $slugs, true)) $list[] = ['slug' => 'crackmaster', 'name' => 'CRACK MASTER', 'api_id' => 0, 'enabled' => 1, 'provider' => 'crackmaster'];
+        }
         // সেভ করা লিস্টে API ID 0 থাকলে ডিফল্ট ID বসবে (KeyManager reset API IDs)
         $defaultIds = [];
         foreach (vpDefaultResetProducts() as $__d) { $defaultIds[$__d['slug']] = (int)$__d['api_id']; }
@@ -373,6 +386,7 @@ if (!function_exists('vpGetResetProducts')) {
                 'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
                 'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
                 'token'   => trim((string)($r['token'] ?? '')),
+                'provider'=> (($r['provider'] ?? '') === 'crackmaster') ? 'crackmaster' : 'keymanager',
             ];
             if ($onlyEnabled && !$row['enabled']) continue;
             $out[] = $row;
@@ -1017,7 +1031,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                 if ($slug === '' || isset($seen[$slug])) $slug = substr(md5($nm . microtime(true) . $i), 0, 10);
                 $seen[$slug] = 1;
                 $tok  = trim((string)(($_POST['rp_token'] ?? [])[$i] ?? ''));
-                $newList[] = ['slug' => $slug, 'name' => mb_substr($nm, 0, 100), 'api_id' => max(0, (int)($apis[$i] ?? 0)), 'enabled' => isset($ens[$i]) ? 1 : 0, 'token' => mb_substr($tok, 0, 120)];
+                $prov = ((($_POST['rp_provider'] ?? [])[$i] ?? '') === 'crackmaster') ? 'crackmaster' : 'keymanager';
+                $newList[] = ['slug' => $slug, 'name' => mb_substr($nm, 0, 100), 'api_id' => max(0, (int)($apis[$i] ?? 0)), 'enabled' => isset($ens[$i]) ? 1 : 0, 'token' => mb_substr($tok, 0, 120), 'provider' => $prov];
             }
         }
         $json = json_encode($newList, JSON_UNESCAPED_UNICODE);
@@ -1034,6 +1049,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $rKey = trim((string)($_POST['reset_api_key'] ?? ''));
         if ($rKey !== '') $stRs->execute(['reset_api_key', $rKey, $rKey]);          // খালি রাখলে আগের কি থাকবে
         if (isset($_POST['reset_api_key_clear'])) $stRs->execute(['reset_api_key', '', '']);
+        $cmUrl = trim((string)($_POST['crackmaster_reset_url'] ?? ''));
+        if ($cmUrl === '' || !filter_var($cmUrl, FILTER_VALIDATE_URL)) $cmUrl = 'https://crackmaster.shop/reseller_api.php?action=reset_key';
+        $stRs->execute(['crackmaster_reset_url', $cmUrl, $cmUrl]);
+        $cmKey = trim((string)($_POST['crackmaster_api_key'] ?? ''));
+        if ($cmKey !== '') $stRs->execute(['crackmaster_api_key', $cmKey, $cmKey]);
         $toast = ['type' => 'success', 'msg' => '✅ Reset API settings saved (main + all sub domains)'];
     }
 
@@ -3524,6 +3544,14 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         <button type="submit" name="admin_action" value="test_reset_api" class="px-4 py-2.5 rounded-xl bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase text-[11px] font-black">Test</button>
                     </div>
                     <span class="text-[10px] text-slate-500 font-sans block">রিসেট URL: <code class="text-cyan-300">?action=reset_key&amp;api_id=ID&amp;key=KEY&amp;api_key=…</code> — মেইন ও সব সাব-ডোমেইনের Reset পেজ এটা ব্যবহার করে।</span>
+                    <div class="pt-2 border-t border-slate-800 space-y-2">
+                        <span class="text-white font-bold block">🔓 Crack Master Reset</span>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <input type="url" name="crackmaster_reset_url" value="<?= htmlspecialchars($rsCfg['cm_url']) ?>" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono" placeholder="https://crackmaster.shop/reseller_api.php?action=reset_key">
+                            <input type="password" name="crackmaster_api_key" value="" autocomplete="new-password" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-lg text-purple-300 outline-none font-mono" placeholder="<?= $rsCfg['cm_key'] !== '' ? 'API key saved — blank = keep' : 'API key (optional, only if Crack Master gives one)' ?>">
+                        </div>
+                        <span class="text-[10px] text-slate-500 font-sans block">POST <code class="text-cyan-300">license_key</code> → এই URL। লিস্টে Provider = Crack Master দেওয়া প্রোডাক্টগুলো এটা দিয়ে রিসেট হয়।</span>
+                    </div>
                 </form>
 
                 <form method="POST" class="space-y-2.5 text-xs">
@@ -3536,6 +3564,10 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                                 <input type="text" name="rp_name[<?= $i ?>]" value="<?= htmlspecialchars($rp['name']) ?>" placeholder="Product name" class="col-span-12 sm:col-span-5 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
                                 <input type="number" min="0" name="rp_api[<?= $i ?>]" value="<?= (int)$rp['api_id'] ?>" placeholder="API ID" title="API ID" class="col-span-4 sm:col-span-2 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
                                 <input type="text" name="rp_token[<?= $i ?>]" value="<?= htmlspecialchars($rp['token'] ?? '') ?>" placeholder="token (optional)" title="Extra token (only if API needs it)" class="col-span-5 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-purple-300 outline-none font-mono text-[10px]">
+                                <select name="rp_provider[<?= $i ?>]" class="col-span-12 sm:col-span-12 bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-[10px] font-bold <?= ($rp['provider'] ?? '') === 'crackmaster' ? 'text-purple-300' : 'text-cyan-300' ?> outline-none order-last">
+                                    <option value="keymanager" <?= ($rp['provider'] ?? '') !== 'crackmaster' ? 'selected' : '' ?>>Provider: KeyManager (api_id)</option>
+                                    <option value="crackmaster" <?= ($rp['provider'] ?? '') === 'crackmaster' ? 'selected' : '' ?>>Provider: Crack Master</option>
+                                </select>
                                 <label class="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold cursor-pointer"><input type="checkbox" name="rp_enabled[<?= $i ?>]" value="1" <?= $rp['enabled'] ? 'checked' : '' ?> class="rounded"> ON</label>
                                 <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 hover:text-red-300 text-sm" title="Remove">✕</button>
                             </div>
@@ -3556,6 +3588,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                             <input type="text" name="rp_name[${i}]" placeholder="Product name" class="col-span-12 sm:col-span-5 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
                             <input type="number" min="0" name="rp_api[${i}]" value="0" class="col-span-4 sm:col-span-2 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
                             <input type="text" name="rp_token[${i}]" placeholder="token (optional)" class="col-span-5 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-purple-300 outline-none font-mono text-[10px]">
+                            <select name="rp_provider[${i}]" class="col-span-12 bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-[10px] font-bold text-cyan-300 outline-none order-last"><option value="keymanager">Provider: KeyManager (api_id)</option><option value="crackmaster">Provider: Crack Master</option></select>
                             <label class="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold"><input type="checkbox" name="rp_enabled[${i}]" value="1" checked class="rounded"> ON</label>
                             <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 text-sm">✕</button>`;
                         document.getElementById('rpEditRows').appendChild(div);

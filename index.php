@@ -527,6 +527,7 @@ if (!function_exists('vpDefaultResetProducts')) {
             ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 4,   'enabled' => 1],
             ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 2,   'enabled' => 1],
             ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
+            ['slug' => 'crackmaster',     'name' => 'CRACK MASTER',         'api_id' => 0,  'enabled' => 1, 'provider' => 'crackmaster'],
         ];
     }
 }
@@ -540,13 +541,17 @@ if (!function_exists('vpResetApiConfig')) {
         $cfg = [
             'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
             'api_key' => defined('RESET_API_KEY') ? (string)RESET_API_KEY : '',
+            'cm_url'  => 'https://crackmaster.shop/reseller_api.php?action=reset_key',
+            'cm_key'  => defined('CRACKMASTER_API_KEY') ? (string)CRACKMASTER_API_KEY : '',
         ];
         try {
-            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key')");
+            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key')");
             foreach (($st ? $st->fetchAll(PDO::FETCH_KEY_PAIR) : []) as $k => $v) {
                 $v = trim((string)$v);
                 if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
                 if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
+                if ($k === 'crackmaster_reset_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['cm_url'] = $v;
+                if ($k === 'crackmaster_api_key' && $v !== '' && $v !== '0') $cfg['cm_key'] = $v;
             }
         } catch (Throwable $e) {}
         $cfg['api_key'] = trim($cfg['api_key']);
@@ -554,8 +559,9 @@ if (!function_exists('vpResetApiConfig')) {
     }
 }
 if (!function_exists('vpCallResetApi')) {
-    function vpCallResetApi(string $url): array {
+    function vpCallResetApi(string $url, ?array $postFields = null): array {
         $ch = curl_init();
+        if ($postFields !== null) { curl_setopt($ch, CURLOPT_POST, true); curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields); }
         curl_setopt_array($ch, [
             CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
             CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 25,
@@ -599,6 +605,13 @@ if (!function_exists('vpGetResetProducts')) {
             if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
         } catch (Throwable $e) {}
         if ($list === null) $list = vpDefaultResetProducts();
+        // পুরনো সেভ করা লিস্ট (provider ফিল্ড নেই) → Crack Master নিজে থেকে যোগ হবে
+        $hasProviderField = false;
+        foreach ($list as $__r) { if (is_array($__r) && array_key_exists('provider', $__r)) { $hasProviderField = true; break; } }
+        if (!$hasProviderField) {
+            $slugs = array_map(function ($r) { return (string)($r['slug'] ?? ''); }, $list);
+            if (!in_array('crackmaster', $slugs, true)) $list[] = ['slug' => 'crackmaster', 'name' => 'CRACK MASTER', 'api_id' => 0, 'enabled' => 1, 'provider' => 'crackmaster'];
+        }
         // সেভ করা লিস্টে API ID 0 থাকলে ডিফল্ট ID বসবে (KeyManager reset API IDs)
         $defaultIds = [];
         foreach (vpDefaultResetProducts() as $__d) { $defaultIds[$__d['slug']] = (int)$__d['api_id']; }
@@ -612,6 +625,7 @@ if (!function_exists('vpGetResetProducts')) {
                 'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
                 'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
                 'token'   => trim((string)($r['token'] ?? '')),
+                'provider'=> (($r['provider'] ?? '') === 'crackmaster') ? 'crackmaster' : 'keymanager',
             ];
             if ($onlyEnabled && !$row['enabled']) continue;
             $out[] = $row;
@@ -2230,7 +2244,13 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
     // ── রিসেট API কল (মেইন + সব সাব-ডোমেইন একই KeyManager রিসেট API — Mother Panel → Connect Key Manager থেকে সেট) ──
     $apiId = (int)($keyRow['api_id'] ?? 0);
 
-    if ($apiId <= 0) {
+    if (($chosenReset['provider'] ?? 'keymanager') === 'crackmaster') {
+        // 🔓 CRACK MASTER: POST license_key → crackmaster.shop/reseller_api.php?action=reset_key
+        $cfgCm = vpResetApiConfig($pdo);
+        $cmFields = ['license_key' => $rawKey];
+        if ($cfgCm['cm_key'] !== '') $cmFields['api_key'] = $cfgCm['cm_key'];
+        $res = vpCallResetApi($cfgCm['cm_url'], $cmFields);
+    } elseif ($apiId <= 0) {
         // API ID দেওয়া নেই → এই স্টোরের Connect Key Manager দিয়ে রিসেট
         $kmUrl = trim((string)($settings['km_api_url'] ?? ''));
         $kmKey = trim((string)($settings['km_api_key'] ?? ''));
