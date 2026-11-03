@@ -247,6 +247,7 @@ CREATE TABLE IF NOT EXISTS `products` (
   `is_active` tinyint(1) DEFAULT 1,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   `maintenance_msg` text DEFAULT NULL,
+  `maintenance_link` varchar(255) DEFAULT NULL,
   `is_maintenance` tinyint(1) NOT NULL DEFAULT 0,
   `reset_enabled` tinyint(1) NOT NULL DEFAULT 1,
   `km_api_id` int(11) NOT NULL DEFAULT 0,
@@ -709,6 +710,7 @@ CALL vp_add_column('products', 'is_pinned', '`is_pinned` tinyint(1) DEFAULT 0');
 CALL vp_add_column('products', 'is_active', '`is_active` tinyint(1) DEFAULT 1');
 CALL vp_add_column('products', 'created_at', '`created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP');
 CALL vp_add_column('products', 'maintenance_msg', '`maintenance_msg` text DEFAULT NULL');
+CALL vp_add_column('products', 'maintenance_link', '`maintenance_link` varchar(255) DEFAULT NULL');
 CALL vp_add_column('products', 'is_maintenance', '`is_maintenance` tinyint(1) NOT NULL DEFAULT 0');
 CALL vp_add_column('products', 'reset_enabled', '`reset_enabled` tinyint(1) NOT NULL DEFAULT 1');
 CALL vp_add_column('products', 'km_api_id', '`km_api_id` int(11) NOT NULL DEFAULT 0');

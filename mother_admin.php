@@ -1083,6 +1083,18 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $toast = ['type' => 'success', 'msg' => "Prices saved for $cnt plan(s) — Customer & Reseller!"];
     }
 
+
+if (!function_exists('vpNormalizeTgLink')) {
+    // টেলিগ্রাম লিংক ঠিক করা: @channel → https://t.me/channel ; শুধু http(s) / tg:// গ্রহণ
+    function vpNormalizeTgLink(string $l): string {
+        $l = trim($l);
+        if ($l === '') return '';
+        if ($l[0] === '@') $l = 'https://t.me/' . substr($l, 1);
+        elseif (preg_match('#^(t\.me|telegram\.me)/#i', $l)) $l = 'https://' . $l;
+        if (!preg_match('#^(https?://|tg://)#i', $l)) return '';
+        return mb_substr($l, 0, 255);
+    }
+}
     // 🔧 QUICK PRODUCT MAINTENANCE TOGGLE (প্রোডাক্ট লিস্ট থেকে এক ক্লিকে)
     if ($act === 'toggle_product_maintenance') {
         $prodId   = (int)($_POST['product_id'] ?? 0);
@@ -1091,7 +1103,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         if ($prodId > 0) {
             $pdo->prepare("UPDATE products SET is_maintenance = ?, is_active = ?, maintenance_msg = ? WHERE id = ? AND subdomain_id = 0")
                 ->execute([$turnOn ? 1 : 0, $turnOn ? 0 : 1, $maintMsg !== '' ? $maintMsg : null, $prodId]);
-            $toast = ['type' => 'success', 'msg' => $turnOn ? '🔧 Product is now in MAINTENANCE (shows red on store)' : '✅ Product is back ONLINE'];
+            if (array_key_exists('maintenance_link', $_POST)) {
+                try {
+                    $pdo->prepare("UPDATE products SET maintenance_link = ? WHERE id = ? AND subdomain_id = 0")->execute([vpNormalizeTgLink((string)$_POST['maintenance_link']) ?: null, $prodId]);
+                } catch (Throwable $e) { $vpMaintLinkErr = true; }
+            }
+            $toast = ['type' => 'success', 'msg' => ($turnOn ? '🔧 Product is now in MAINTENANCE (shows red on store)' : '✅ Product is back ONLINE') . (!empty($vpMaintLinkErr) ? ' — Telegram link not saved: please import database.sql' : '')];
         }
     }
 
@@ -1136,6 +1153,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
             $pdo->prepare("UPDATE products SET is_maintenance = ?, maintenance_msg = ? WHERE id = ? AND subdomain_id = 0")
                 ->execute([$isActive ? 0 : 1, $maintMsgEdit !== '' ? $maintMsgEdit : null, $prodId]);
         } catch (Throwable $e) {}
+        if (array_key_exists('maintenance_link', $_POST)) {
+            try { $pdo->prepare("UPDATE products SET maintenance_link = ? WHERE id = ? AND subdomain_id = 0")->execute([vpNormalizeTgLink((string)$_POST['maintenance_link']) ?: null, $prodId]); } catch (Throwable $e) {}
+        }
         // 🔄 Reset permission + Reset API ID
         try {
             if (isset($_POST['reset_form_present'])) {
@@ -3324,12 +3344,13 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                             </div>
 
                             <!-- 🔧 QUICK MAINTENANCE CONTROL -->
-                            <form method="POST" class="flex items-center gap-2 p-2 rounded-xl <?= $isProdActive ? 'bg-slate-900/60 border border-slate-800' : 'bg-red-950/40 border border-red-500/40' ?>">
+                            <form method="POST" class="flex flex-wrap items-center gap-2 p-2 rounded-xl <?= $isProdActive ? 'bg-slate-900/60 border border-slate-800' : 'bg-red-950/40 border border-red-500/40' ?>">
                                 <input type="hidden" name="admin_action" value="toggle_product_maintenance">
                                 <input type="hidden" name="active_tab" value="tab-products">
                                 <input type="hidden" name="product_id" value="<?= (int)$prod['id'] ?>">
                                 <input type="hidden" name="maint_state" value="<?= $isProdActive ? '1' : '0' ?>">
-                                <input type="text" name="maintenance_msg" value="<?= htmlspecialchars($prod['maintenance_msg'] ?? '') ?>" placeholder="Notice: e.g. Update চলছে, ৬টায় চালু" class="flex-1 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-amber-300 outline-none text-xs">
+                                <textarea name="maintenance_msg" rows="2" placeholder="Rules / notice: e.g. সার্ভার আপগ্রেড চলছে, খুব শীঘ্রই চালু হবে" class="flex-1 min-w-[60%] bg-[#030612] border border-slate-800 p-2 rounded-lg text-amber-300 outline-none text-xs resize-y"><?= htmlspecialchars($prod['maintenance_msg'] ?? '') ?></textarea>
+                                <input type="text" name="maintenance_link" value="<?= htmlspecialchars($prod['maintenance_link'] ?? '') ?>" placeholder="Telegram link (optional): https://t.me/yourchannel" class="w-full order-last bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 outline-none text-xs font-mono">
                                 <button type="submit" class="py-2 px-3 rounded-lg font-black text-[11px] uppercase tracking-wider whitespace-nowrap transition <?= $isProdActive ? 'bg-red-600 hover:bg-red-500 text-white' : 'bg-emerald-500 hover:bg-emerald-400 text-slate-950' ?>">
                                     <?= $isProdActive ? '🔧 Maintenance' : '✅ Go Online' ?>
                                 </button>
@@ -5495,7 +5516,8 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
 
                 <div>
                     <label class="text-amber-400 block mb-1 font-bold">Maintenance Notice Message (প্রোডাক্ট অফলাইন থাকলে যে নোটিশ দেখাবে)</label>
-                    <input type="text" id="editModalMaintMsg" name="maintenance_msg" placeholder="e.g. V2.5 Update In Progress, Back at 6 PM" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-amber-300 outline-none text-xs">
+                    <textarea id="editModalMaintMsg" name="maintenance_msg" rows="3" placeholder="e.g. V2.5 Update In Progress, Back at 6 PM" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-amber-300 outline-none text-xs resize-y"></textarea>
+                    <input type="text" id="editModalMaintLink" name="maintenance_link" placeholder="Maintenance Telegram link (optional): https://t.me/yourchannel" class="w-full mt-2 bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-cyan-300 outline-none text-xs font-mono">
                 </div>
 
                 <div class="space-y-2 pt-2 border-t border-slate-800">
@@ -6141,6 +6163,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
             document.getElementById('editModalTags').value = prod.tags || '';
             document.getElementById('editModalDesc').value = prod.description || '';
             document.getElementById('editModalMaintMsg').value = prod.maintenance_msg || '';
+            if (document.getElementById('editModalMaintLink')) document.getElementById('editModalMaintLink').value = prod.maintenance_link || '';
             if (document.getElementById('editModalResetEnabled')) document.getElementById('editModalResetEnabled').checked = (prod.reset_enabled === undefined || prod.reset_enabled === null) ? true : (parseInt(prod.reset_enabled) === 1);
             if (document.getElementById('editModalKmApiId')) document.getElementById('editModalKmApiId').value = parseInt(prod.km_api_id || 0) || '';
             document.getElementById('editModalIsPinned').checked = (parseInt(prod.is_pinned) === 1);

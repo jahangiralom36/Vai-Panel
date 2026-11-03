@@ -2843,6 +2843,15 @@ try {
     }
     unset($cp);
 
+    // 🔧 মেইনটেনেন্স টেলিগ্রাম লিংক (আলাদা কুয়েরি — কলাম না থাকলেও স্টোর ঠিক চলবে)
+    try {
+        $stML = $pdo->prepare("SELECT id, maintenance_link FROM products WHERE subdomain_id = ? AND maintenance_link IS NOT NULL AND maintenance_link != ''");
+        $stML->execute([$currentSubdomainId]);
+        foreach ($stML->fetchAll(PDO::FETCH_KEY_PAIR) as $__pid => $__lnk) {
+            if (isset($catalogProducts[(int)$__pid]) && preg_match('#^(https?://|tg://)#i', (string)$__lnk)) $catalogProducts[(int)$__pid]['maintenance_link'] = (string)$__lnk;
+        }
+    } catch (Throwable $e) {}
+
     // BUILD ORDERED CATEGORY LIST: ALL -> NONROOT -> ROOT -> IPHONE -> PC -> OTHER -> (others)
     $allDiscoveredCats = array_unique(array_merge($dynamicCategoriesFound, $discoveredFromProducts));
     $orderedCategories = [];
@@ -3762,20 +3771,22 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
 
     <!-- 🔧 MAINTENANCE POPUP (প্রোডাক্টে ট্যাপ করলে অ্যাডমিনের লেখা নোটিশ) -->
     <div id="maintPopup" class="fixed inset-0 z-[99990] hidden items-center justify-center p-5 bg-black/85 backdrop-blur-sm" onclick="if(event.target===this) closeMaintPopup()">
-        <div class="maint-pop-card w-full max-w-sm p-5 space-y-3.5 text-center relative">
-            <button type="button" onclick="closeMaintPopup()" class="absolute top-3 right-3 w-8 h-8 rounded-full bg-white/10 text-gray-300 hover:text-white" aria-label="Close">✕</button>
-            <div id="maintPopIcon" class="maint-pop-icon"><i class="fa-solid fa-screwdriver-wrench"></i></div>
-            <div class="space-y-1">
-                <span class="inline-block px-3 py-0.5 rounded-full text-[9px] font-black tracking-[0.2em] bg-rose-600 text-white font-mono">🔧 MAINTENANCE</span>
-                <h3 id="maintPopName" class="text-base font-black text-white font-sans">Product</h3>
+        <div class="maint-pop-card w-full max-w-sm p-5 space-y-4 text-center relative">
+            <button type="button" onclick="closeMaintPopup()" class="absolute top-3 right-3 w-9 h-9 rounded-full bg-white/10 text-gray-300 hover:text-white" aria-label="Close">✕</button>
+            <div id="maintPopIcon" class="maint-pop-icon"><i class="fa-solid fa-triangle-exclamation"></i></div>
+            <div class="space-y-1.5">
+                <span class="inline-block px-3 py-1 rounded-full text-[10px] font-black tracking-[0.15em] bg-rose-500/15 text-rose-300 border border-rose-500/60 font-mono">TEMPORARILY UNAVAILABLE</span>
+                <h3 id="maintPopName" class="text-lg font-black text-white font-sans uppercase">Product</h3>
             </div>
-            <p id="maintPopMsg" class="maint-pop-msg p-3 text-xs font-bold font-sans leading-relaxed text-left"></p>
-            <p class="text-[10px] text-gray-400 font-sans">এই প্রোডাক্টটি এখন সাময়িকভাবে বন্ধ আছে। চালু হলে আবার কিনতে পারবেন।</p>
-            <div class="flex gap-2">
-                <?php if (!empty($tenantTelegram)): ?>
-                    <a href="<?= htmlspecialchars($tenantTelegram) ?>" target="_blank" rel="noopener" class="flex-1 py-2.5 rounded-xl bg-[#0f061e] border border-cyan-500/50 text-cyan-300 text-xs font-black uppercase font-mono">Support</a>
-                <?php endif; ?>
-                <button type="button" onclick="closeMaintPopup()" class="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-rose-600 to-pink-600 text-white text-xs font-black uppercase font-mono shadow-lg">OK, Got it</button>
+            <div class="text-left space-y-1.5">
+                <span class="text-[11px] font-black text-rose-300 uppercase tracking-wider font-sans flex items-center gap-1.5"><i class="fa-solid fa-clipboard-list"></i> Rules &amp; Information:</span>
+                <p id="maintPopMsg" class="maint-pop-msg p-3.5 text-[13px] font-bold font-sans leading-relaxed"></p>
+            </div>
+            <div class="space-y-2">
+                <a id="maintPopSupport" href="#" target="_blank" rel="noopener" class="hidden w-full py-3 rounded-2xl bg-gradient-to-r from-sky-500 to-blue-600 text-white text-sm font-black uppercase font-sans shadow-lg items-center justify-center gap-2">
+                    <i class="fa-brands fa-telegram"></i> <span>Contact Admin Support</span>
+                </a>
+                <button type="button" onclick="closeMaintPopup()" class="w-full py-3 rounded-2xl bg-[#0f061e] border border-white/10 text-white text-sm font-black uppercase font-sans">Close</button>
             </div>
         </div>
     </div>
@@ -3969,6 +3980,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                              data-maint-name="<?= htmlspecialchars($prod['name']) ?>"
                              data-maint-msg="<?= htmlspecialchars($prod['maintenance_msg'] ?? '') ?>"
                              data-maint-logo="<?= htmlspecialchars(!empty($prod['logo_url']) ? $prod['logo_url'] : ($bannerImg ?? '')) ?>"
+                             data-maint-link="<?= htmlspecialchars($prod['maintenance_link'] ?? '') ?>"
                              onclick="openMaintPopup(this)"
                              <?php else: ?>
                              onclick="openProductModal(<?= (int)$prod['id'] ?>)"
@@ -6141,7 +6153,7 @@ document.addEventListener('DOMContentLoaded', function() {
         function openProductModal(productId) {
             const prod = allProductsCatalog[productId];
             if (!prod) return;
-            if (parseInt(prod.is_active) === 0 || parseInt(prod.is_maintenance || 0) === 1) { showMaintPopup(prod.name, prod.maintenance_msg || '', prod.logo_url || prod.banner_url || ''); return; }
+            if (parseInt(prod.is_active) === 0 || parseInt(prod.is_maintenance || 0) === 1) { showMaintPopup(prod.name, prod.maintenance_msg || '', prod.logo_url || prod.banner_url || '', prod.maintenance_link || ''); return; }
             activeModalProduct = prod;
             if (typeof clearModalCoupon === 'function') clearModalCoupon(true);
             document.getElementById('modalProdName').innerText = prod.name;
@@ -6739,18 +6751,26 @@ document.addEventListener('DOMContentLoaded', function() {
         function escapeHtmlRs(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
         // ===================== KEY RESET =====================
         // ===================== 🔧 MAINTENANCE POPUP =====================
-        function showMaintPopup(name, msg, logo) {
+        const VP_STORE_TELEGRAM = <?= json_encode((string)($tenantTelegram ?? '')) ?>;
+        function showMaintPopup(name, msg, logo, link) {
             const pop = document.getElementById('maintPopup');
             if (!pop) { showToast('🔧 ' + (msg || 'This product is under maintenance'), 'error'); return; }
             document.getElementById('maintPopName').textContent = name || 'Product';
-            document.getElementById('maintPopMsg').textContent = (msg && msg.trim()) ? msg : 'This product is under maintenance. Please check back soon.';
+            document.getElementById('maintPopMsg').textContent = (msg && msg.trim()) ? msg : '⚠️ এই প্রোডাক্টটির সার্ভার আপগ্রেড চলছে। সাময়িক অসুবিধার জন্য আমরা দুঃখিত। খুব শীঘ্রই সার্ভিস চালু করা হবে।';
             const icon = document.getElementById('maintPopIcon');
             icon.innerHTML = '';
             if (logo) { const im = document.createElement('img'); im.src = logo; im.alt = ''; icon.appendChild(im); }
-            else icon.innerHTML = '<i class="fa-solid fa-screwdriver-wrench"></i>';
+            else icon.innerHTML = '<i class="fa-solid fa-triangle-exclamation"></i>';
+            // প্রোডাক্টের নিজস্ব টেলিগ্রাম লিংক, না থাকলে স্টোরের সাপোর্ট লিংক
+            const sup = document.getElementById('maintPopSupport');
+            const href = (link && /^(https?:\/\/|tg:\/\/)/i.test(link)) ? link : VP_STORE_TELEGRAM;
+            if (sup) {
+                if (href) { sup.href = href; sup.classList.remove('hidden'); sup.classList.add('flex'); }
+                else { sup.classList.add('hidden'); sup.classList.remove('flex'); }
+            }
             pop.classList.remove('hidden'); pop.classList.add('flex');
         }
-        function openMaintPopup(el) { showMaintPopup(el.dataset.maintName, el.dataset.maintMsg, el.dataset.maintLogo); }
+        function openMaintPopup(el) { showMaintPopup(el.dataset.maintName, el.dataset.maintMsg, el.dataset.maintLogo, el.dataset.maintLink); }
         function closeMaintPopup() { const p = document.getElementById('maintPopup'); if (p) { p.classList.add('hidden'); p.classList.remove('flex'); } }
         document.addEventListener('keydown', e => { if (e.key === 'Escape') closeMaintPopup(); });
 
