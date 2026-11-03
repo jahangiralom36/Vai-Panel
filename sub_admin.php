@@ -288,16 +288,6 @@ try {
     if (!empty($activeTenant['support_whatsapp'])) $settings['support_whatsapp'] = $activeTenant['support_whatsapp'];
 } catch (Throwable $e) {}
 
-// 💱 সাব-ডোমেইন নিজের রেট সেট না করলে মাদার প্যানেলের রেট (BDT / INR) ব্যবহার হবে
-try {
-    $stmtMotherRates = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('usdt_rate', 'inr_rate', 'binance_market_rate')");
-    $motherRates = $stmtMotherRates ? $stmtMotherRates->fetchAll(PDO::FETCH_KEY_PAIR) : [];
-    foreach (['usdt_rate', 'inr_rate', 'binance_market_rate'] as $__rk) {
-        if ((!isset($tenantDbSettings[$__rk]) || (float)$tenantDbSettings[$__rk] <= 0) && !empty($motherRates[$__rk])) {
-            $settings[$__rk] = $motherRates[$__rk];
-        }
-    }
-} catch (Throwable $e) {}
 
 $effectiveBdtRate = max(1.0, (float)($settings['usdt_rate'] ?? 125.0));
 $effectiveInrRate = max(1.0, (float)($settings['inr_rate'] ?? 88.0));
@@ -549,6 +539,134 @@ if (!function_exists('vpSubOwnsUser')) {
         $st = $pdo->prepare("SELECT 1 FROM users WHERE id = ? AND (subdomain_id = ? OR created_by_subdomain = ?) LIMIT 1");
         $st->execute([$userId, $subId, $slug]);
         return (bool)$st->fetchColumn();
+    }
+}
+
+if (!function_exists('vpDefaultResetProducts')) {
+    function vpDefaultResetProducts(): array {
+        return [
+            ['slug' => 'dripclient',      'name' => 'DRIPCLIENT',           'api_id' => 12,  'enabled' => 1],
+            ['slug' => 'fluorite',        'name' => 'FLUORITE',             'api_id' => 11,  'enabled' => 1],
+            ['slug' => 'haxxcker',        'name' => 'Haxxcker Reset',       'api_id' => 3,   'enabled' => 1],
+            ['slug' => 'hgcheats',        'name' => 'HGCHEATS',             'api_id' => 9,   'enabled' => 1],
+            ['slug' => 'silent-apkmod',   'name' => 'Silent Cheats APKMOD', 'api_id' => 4,   'enabled' => 1],
+            ['slug' => 'silent-root',     'name' => 'Silent Cheats Root',   'api_id' => 2,   'enabled' => 1],
+            ['slug' => 'angry-pinxt',     'name' => 'Angry Mod (Pinxt)',    'api_id' => 99, 'enabled' => 1],
+            ['slug' => 'crackmaster',     'name' => 'CRACK MASTER',         'api_id' => 0,  'enabled' => 1, 'provider' => 'crackmaster'],
+        ];
+    }
+}
+// ====================================================================
+// 🔄 RESET API — URL + API key আসে Mother Panel (system_settings) বা config.php (RESET_API_KEY) থেকে।
+// কোডে কোনো গোপন কি রাখা হয় না। উত্তর JSON/টেক্সট যেকোনো ফরম্যাটে বোঝে।
+// ====================================================================
+if (!function_exists('vpStoreSettingsGet')) {
+    // 🔒 প্রতিটা স্টোরের নিজের সেটিং: মেইন = system_settings (Mother Panel), সাব = subdomain_settings (Sub Admin Panel)
+    function vpStoreSettingsGet(PDO $pdo, int $subId, array $keys): array {
+        if (!$keys) return [];
+        $in = implode(',', array_fill(0, count($keys), '?'));
+        try {
+            if ($subId > 0) {
+                $st = $pdo->prepare("SELECT setting_key, setting_value FROM subdomain_settings WHERE subdomain_id = ? AND setting_key IN ($in)");
+                $st->execute(array_merge([$subId], $keys));
+            } else {
+                $st = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ($in)");
+                $st->execute($keys);
+            }
+            return $st->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+        } catch (Throwable $e) { return []; }
+    }
+}
+if (!function_exists('vpResetApiConfig')) {
+    function vpResetApiConfig(PDO $pdo, int $subId = 0): array {
+        $cfg = [
+            'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
+            'api_key' => ($subId === 0 && defined('RESET_API_KEY')) ? (string)RESET_API_KEY : '',
+            'cm_url'  => 'https://crackmaster.shop/reseller_api.php?action=reset_key',
+            'cm_key'  => ($subId === 0 && defined('CRACKMASTER_API_KEY')) ? (string)CRACKMASTER_API_KEY : '',
+        ];
+        try {
+            foreach (vpStoreSettingsGet($pdo, $subId, ['reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key']) as $k => $v) {
+                $v = trim((string)$v);
+                if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
+                if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
+                if ($k === 'crackmaster_reset_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['cm_url'] = $v;
+                if ($k === 'crackmaster_api_key' && $v !== '' && $v !== '0') $cfg['cm_key'] = $v;
+            }
+        } catch (Throwable $e) {}
+        $cfg['api_key'] = trim($cfg['api_key']);
+        return $cfg;
+    }
+}
+if (!function_exists('vpCallResetApi')) {
+    function vpCallResetApi(string $url, ?array $postFields = null): array {
+        $ch = curl_init();
+        if ($postFields !== null) { curl_setopt($ch, CURLOPT_POST, true); curl_setopt($ch, CURLOPT_POSTFIELDS, $postFields); }
+        curl_setopt_array($ch, [
+            CURLOPT_URL => $url, CURLOPT_RETURNTRANSFER => true, CURLOPT_FOLLOWLOCATION => true,
+            CURLOPT_CONNECTTIMEOUT => 8, CURLOPT_TIMEOUT => 25,
+            CURLOPT_SSL_VERIFYPEER => false, CURLOPT_SSL_VERIFYHOST => false,
+            CURLOPT_HTTPHEADER => ['Accept: application/json'], CURLOPT_USERAGENT => 'VaiPanel-Reset/1.0',
+        ]);
+        $body = curl_exec($ch);
+        $err  = curl_error($ch);
+        $code = (int)curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        curl_close($ch);
+        if ($err || $body === false || trim((string)$body) === '') {
+            return ['ok' => false, 'message' => 'Reset server not reachable right now. Please try again in a minute.'];
+        }
+        $body = trim((string)$body);
+        $d = json_decode($body, true);
+        $truthy = function ($v) { return $v === true || $v === 1 || (is_string($v) && in_array(strtolower(trim($v)), ['success', 'true', 'ok', '1', 'done', 'reset'], true)); };
+        if (is_array($d)) {
+            $msg = (string)($d['message'] ?? ($d['msg'] ?? ($d['data']['message'] ?? (is_string($d['error'] ?? null) ? $d['error'] : ''))));
+            $failWord = (bool)preg_match('/\b(fail|failed|error|invalid|not found|expired|denied|limit|wrong|unauthori[sz]ed|cooldown|wait)\b/i', $msg);
+            $ok = $truthy($d['status'] ?? null) || $truthy($d['success'] ?? null) || $truthy($d['result'] ?? null)
+                || (isset($d['code']) && (int)$d['code'] === 200 && !$failWord)
+                || (!$failWord && $msg !== '' && preg_match('/reset|success/i', $msg));
+            if (!empty($d['error'])) $ok = false;
+            if (in_array(strtolower((string)($d['status'] ?? '')), ['error', 'fail', 'failed', 'false'], true) || ($d['success'] ?? null) === false) $ok = false;
+            $ok = $ok && $code < 400;
+            return ['ok' => $ok, 'message' => $msg !== '' ? $msg : ($ok ? 'Reset successful' : 'Reset failed. Please check your key and try again.')];
+        }
+        // JSON নয় — সাধারণ টেক্সট উত্তর
+        $plain = mb_substr(trim(strip_tags($body)), 0, 200);
+        $ok = $code < 400 && preg_match('/success|reset/i', $plain) && !preg_match('/fail|error|invalid|not found|expired|denied/i', $plain);
+        return ['ok' => (bool)$ok, 'message' => $ok ? 'Reset successful' : ($plain !== '' ? $plain : 'Reset failed. Please try again.')];
+    }
+}
+if (!function_exists('vpGetResetProducts')) {
+    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false, int $subId = 0): array {
+        $list = null;
+        $raw = vpStoreSettingsGet($pdo, $subId, ['reset_api_products'])['reset_api_products'] ?? '';
+        if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
+        if ($list === null) $list = vpDefaultResetProducts();
+        // পুরনো সেভ করা লিস্ট (provider ফিল্ড নেই) → Crack Master নিজে থেকে যোগ হবে
+        $hasProviderField = false;
+        foreach ($list as $__r) { if (is_array($__r) && array_key_exists('provider', $__r)) { $hasProviderField = true; break; } }
+        if (!$hasProviderField) {
+            $slugs = array_map(function ($r) { return (string)($r['slug'] ?? ''); }, $list);
+            if (!in_array('crackmaster', $slugs, true)) $list[] = ['slug' => 'crackmaster', 'name' => 'CRACK MASTER', 'api_id' => 0, 'enabled' => 1, 'provider' => 'crackmaster'];
+        }
+        // সেভ করা লিস্টে API ID 0 থাকলে ডিফল্ট ID বসবে (KeyManager reset API IDs)
+        $defaultIds = [];
+        foreach (vpDefaultResetProducts() as $__d) { $defaultIds[$__d['slug']] = (int)$__d['api_id']; }
+        $out = [];
+        foreach ($list as $r) {
+            $name = trim((string)($r['name'] ?? ''));
+            if ($name === '') continue;
+            $row = [
+                'slug'    => (string)($r['slug'] ?? substr(md5($name), 0, 10)),
+                'name'    => $name,
+                'api_id'  => max(0, (int)($r['api_id'] ?? 0)) ?: ($defaultIds[(string)($r['slug'] ?? '')] ?? 0),
+                'enabled' => (int)($r['enabled'] ?? 1) === 1 ? 1 : 0,
+                'token'   => trim((string)($r['token'] ?? '')),
+                'provider'=> (($r['provider'] ?? '') === 'crackmaster') ? 'crackmaster' : 'keymanager',
+            ];
+            if ($onlyEnabled && !$row['enabled']) continue;
+            $out[] = $row;
+        }
+        return $out;
     }
 }
 
@@ -1146,6 +1264,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         }
     }
 
+    if ($act === 'save_reset_api_products') {
+        $names = $_POST['rp_name'] ?? []; $apis = $_POST['rp_api'] ?? []; $slugs = $_POST['rp_slug'] ?? []; $ens = $_POST['rp_enabled'] ?? [];
+        $newList = []; $seen = [];
+        if (is_array($names)) {
+            foreach ($names as $i => $nm) {
+                $nm = trim((string)$nm);
+                if ($nm === '') continue;
+                $slug = preg_replace('/[^a-z0-9-]/', '', strtolower((string)($slugs[$i] ?? '')));
+                if ($slug === '' || isset($seen[$slug])) $slug = substr(md5($nm . microtime(true) . $i), 0, 10);
+                $seen[$slug] = 1;
+                $tok  = trim((string)(($_POST['rp_token'] ?? [])[$i] ?? ''));
+                $prov = ((($_POST['rp_provider'] ?? [])[$i] ?? '') === 'crackmaster') ? 'crackmaster' : 'keymanager';
+                $newList[] = ['slug' => $slug, 'name' => mb_substr($nm, 0, 100), 'api_id' => max(0, (int)($apis[$i] ?? 0)), 'enabled' => isset($ens[$i]) ? 1 : 0, 'token' => mb_substr($tok, 0, 120), 'provider' => $prov];
+            }
+        }
+        $json = json_encode($newList, JSON_UNESCAPED_UNICODE);
+        saveTenantSetting($pdo, $subadminTenantId, 'reset_api_products', $json);
+        $toast = ['type' => 'success', 'msg' => 'Reset products saved (' . count($newList) . ' items)!'];
+    }
+
+    // 🔄 RESET API SETTINGS (URL + API KEY) — শুধু এই স্টোরের রিসেট
+    if ($act === 'save_reset_api_settings') {
+        $rUrl = trim((string)($_POST['reset_api_url'] ?? ''));
+        if ($rUrl === '' || !filter_var($rUrl, FILTER_VALIDATE_URL)) $rUrl = 'https://keymanager.shop/api.php';
+        saveTenantSetting($pdo, $subadminTenantId, 'reset_api_url', (string)$rUrl);
+        $rKey = trim((string)($_POST['reset_api_key'] ?? ''));
+        if ($rKey !== '') saveTenantSetting($pdo, $subadminTenantId, 'reset_api_key', (string)$rKey);          // খালি রাখলে আগের কি থাকবে
+        if (isset($_POST['reset_api_key_clear'])) saveTenantSetting($pdo, $subadminTenantId, 'reset_api_key', (string)'');
+        $cmUrl = trim((string)($_POST['crackmaster_reset_url'] ?? ''));
+        if ($cmUrl === '' || !filter_var($cmUrl, FILTER_VALIDATE_URL)) $cmUrl = 'https://crackmaster.shop/reseller_api.php?action=reset_key';
+        saveTenantSetting($pdo, $subadminTenantId, 'crackmaster_reset_url', (string)$cmUrl);
+        $cmKey = trim((string)($_POST['crackmaster_api_key'] ?? ''));
+        if ($cmKey !== '') saveTenantSetting($pdo, $subadminTenantId, 'crackmaster_api_key', (string)$cmKey);
+        $toast = ['type' => 'success', 'msg' => '✅ Reset API settings saved (this store only)'];
+    }
+
+    if ($act === 'test_reset_api') {
+        $cfg = vpResetApiConfig($pdo, $subadminTenantId);
+        $firstId = 0;
+        foreach (vpGetResetProducts($pdo, true, $subadminTenantId) as $__p) { if ((int)$__p['api_id'] > 0) { $firstId = (int)$__p['api_id']; break; } }
+        if ($cfg['api_key'] === '') {
+            $toast = ['type' => 'error', 'msg' => 'Please save the Reset API key first.'];
+        } else {
+            $r = vpCallResetApi($cfg['api_url'] . '?' . http_build_query(['action' => 'reset_key', 'api_id' => $firstId ?: 1, 'key' => 'VAIPANEL-TEST-0000', 'api_key' => $cfg['api_key']]));
+            if (preg_match('/not reachable/i', $r['message'])) {
+                $toast = ['type' => 'error', 'msg' => '❌ ' . $r['message']];
+            } elseif (preg_match('/api.?key|unauthori[sz]ed|forbidden|invalid key|access denied/i', $r['message'])) {
+                $toast = ['type' => 'error', 'msg' => '❌ API key problem: ' . $r['message']];
+            } else {
+                $toast = ['type' => 'success', 'msg' => '✅ Reset API connected (test key reply: ' . $r['message'] . ')'];
+            }
+        }
+    }
+
     // 🔄 PRODUCT RESET PERMISSION TOGGLE
     if ($act === 'toggle_product_reset') {
         $prodId = (int)($_POST['product_id'] ?? 0);
@@ -1557,7 +1729,7 @@ if (!function_exists('vpNormalizeTgLink')) {
         foreach ($vals as $k => $val) { saveTenantSetting($pdo, $subadminTenantId, $k, $val); $settings[$k] = $val; }
         $okCfg = $vals['firebase_api_key'] !== '' && $vals['firebase_project_id'] !== '';
         $toast = isset($_POST['firebase_use_main'])
-            ? ['type' => 'success', 'msg' => 'Now using the main site Google login for this store.']
+            ? ['type' => 'success', 'msg' => 'Gmail login turned off for this store.']
             : ($okCfg ? ['type' => 'success', 'msg' => '✅ Firebase saved! Now add your store domain in Firebase → Authentication → Settings → Authorized domains.']
                       : ['type' => 'error', 'msg' => 'apiKey and projectId are required (or paste the full firebaseConfig).']);
     }
@@ -3275,6 +3447,82 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
 
         <!-- 4. CONNECT KEY MANAGER TERMINAL -->
         <section id="tab-connectkm" class="tab-section hidden space-y-5 font-mono">
+            <!-- 🔄 RESET API PRODUCTS EDITOR -->
+            <?php $rpEditList = vpGetResetProducts($pdo, false, $subadminTenantId); ?>
+            <div class="box-panel p-5 space-y-4 border-emerald-500/30">
+                <div class="pb-3 border-b border-slate-800">
+                    <h3 class="text-xs font-black text-emerald-400 uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-arrows-rotate"></i> RESET PAGE PRODUCTS (HWID RESET API)</h3>
+                    <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">স্টোরের Reset পেজে "Step 1 — Select Product" এ এই প্রোডাক্টগুলো আসবে (শুধু এই স্টোর)। প্রতিটার KeyManager API ID দিন। API ID 0 হলে Connect Key Manager এর ডিফল্ট API দিয়ে রিসেট হবে।</span>
+                </div>
+                <?php $rsCfg = vpResetApiConfig($pdo, $subadminTenantId); $rsKeySet = $rsCfg['api_key'] !== ''; ?>
+                <form method="POST" class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800 space-y-2.5 text-xs">
+                    <input type="hidden" name="admin_action" value="save_reset_api_settings">
+                    <input type="hidden" name="active_tab" value="tab-connectkm">
+                    <div class="flex flex-wrap items-center justify-between gap-2">
+                        <span class="text-white font-bold">🔐 Reset API (KeyManager)</span>
+                        <span class="px-2 py-0.5 rounded-lg text-[10px] font-black <?= $rsKeySet ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30' : 'bg-red-500/20 text-red-300 border border-red-500/30' ?>"><?= $rsKeySet ? '✅ API KEY SAVED' : '❌ API KEY MISSING' ?></span>
+                    </div>
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input type="url" name="reset_api_url" value="<?= htmlspecialchars($rsCfg['api_url']) ?>" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono" placeholder="https://keymanager.shop/api.php">
+                        <input type="password" name="reset_api_key" value="" autocomplete="new-password" class="w-full bg-[#030612] border border-amber-500/40 p-2.5 rounded-lg text-amber-300 outline-none font-mono" placeholder="<?= $rsKeySet ? 'Saved (…' . htmlspecialchars(substr($rsCfg['api_key'], -4)) . ') — blank = keep' : 'Paste KeyManager api_key (keymanager_live_...)' ?>">
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="submit" class="flex-1 py-2.5 btn-cyan rounded-xl uppercase text-[11px] font-black">💾 Save Reset API</button>
+                        <button type="submit" name="admin_action" value="test_reset_api" class="px-4 py-2.5 rounded-xl bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase text-[11px] font-black">Test</button>
+                    </div>
+                    <span class="text-[10px] text-slate-500 font-sans block">রিসেট URL: <code class="text-cyan-300">?action=reset_key&amp;api_id=ID&amp;key=KEY&amp;api_key=…</code> — এই স্টোরের Reset পেজ এটা ব্যবহার করে।</span>
+                    <div class="pt-2 border-t border-slate-800 space-y-2">
+                        <span class="text-white font-bold block">🔓 Crack Master Reset</span>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                            <input type="url" name="crackmaster_reset_url" value="<?= htmlspecialchars($rsCfg['cm_url']) ?>" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-lg text-white outline-none font-mono" placeholder="https://crackmaster.shop/reseller_api.php?action=reset_key">
+                            <input type="password" name="crackmaster_api_key" value="" autocomplete="new-password" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-lg text-purple-300 outline-none font-mono" placeholder="<?= $rsCfg['cm_key'] !== '' ? 'API key saved — blank = keep' : 'API key (optional, only if Crack Master gives one)' ?>">
+                        </div>
+                        <span class="text-[10px] text-slate-500 font-sans block">POST <code class="text-cyan-300">license_key</code> → এই URL। লিস্টে Provider = Crack Master দেওয়া প্রোডাক্টগুলো এটা দিয়ে রিসেট হয়।</span>
+                    </div>
+                </form>
+
+                <form method="POST" class="space-y-2.5 text-xs">
+                    <input type="hidden" name="admin_action" value="save_reset_api_products">
+                    <input type="hidden" name="active_tab" value="tab-connectkm">
+                    <div id="rpEditRows" class="space-y-2">
+                        <?php foreach ($rpEditList as $i => $rp): ?>
+                            <div class="rp-edit-row grid grid-cols-12 gap-2 items-center bg-slate-900/80 p-2 rounded-xl border border-slate-800">
+                                <input type="hidden" name="rp_slug[<?= $i ?>]" value="<?= htmlspecialchars($rp['slug']) ?>">
+                                <input type="text" name="rp_name[<?= $i ?>]" value="<?= htmlspecialchars($rp['name']) ?>" placeholder="Product name" class="col-span-12 sm:col-span-5 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
+                                <input type="number" min="0" name="rp_api[<?= $i ?>]" value="<?= (int)$rp['api_id'] ?>" placeholder="API ID" title="API ID" class="col-span-4 sm:col-span-2 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
+                                <input type="text" name="rp_token[<?= $i ?>]" value="<?= htmlspecialchars($rp['token'] ?? '') ?>" placeholder="token (optional)" title="Extra token (only if API needs it)" class="col-span-5 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-purple-300 outline-none font-mono text-[10px]">
+                                <select name="rp_provider[<?= $i ?>]" class="col-span-12 sm:col-span-12 bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-[10px] font-bold <?= ($rp['provider'] ?? '') === 'crackmaster' ? 'text-purple-300' : 'text-cyan-300' ?> outline-none order-last">
+                                    <option value="keymanager" <?= ($rp['provider'] ?? '') !== 'crackmaster' ? 'selected' : '' ?>>Provider: KeyManager (api_id)</option>
+                                    <option value="crackmaster" <?= ($rp['provider'] ?? '') === 'crackmaster' ? 'selected' : '' ?>>Provider: Crack Master</option>
+                                </select>
+                                <label class="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold cursor-pointer"><input type="checkbox" name="rp_enabled[<?= $i ?>]" value="1" <?= $rp['enabled'] ? 'checked' : '' ?> class="rounded"> ON</label>
+                                <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 hover:text-red-300 text-sm" title="Remove">✕</button>
+                            </div>
+                        <?php endforeach; ?>
+                    </div>
+                    <div class="flex flex-wrap gap-2">
+                        <button type="button" onclick="rpAddRow()" class="px-3 py-2 rounded-xl bg-slate-800 text-cyan-300 font-bold text-[11px] uppercase">+ Add Product</button>
+                        <button type="submit" class="flex-1 py-2.5 btn-emerald rounded-xl uppercase text-xs font-black">💾 Save Reset Products</button>
+                    </div>
+                </form>
+                <script>
+                    let rpRowIdx = <?= count($rpEditList) + 100 ?>;
+                    function rpAddRow() {
+                        const i = rpRowIdx++;
+                        const div = document.createElement('div');
+                        div.className = 'rp-edit-row grid grid-cols-12 gap-2 items-center bg-slate-900/80 p-2 rounded-xl border border-emerald-500/40';
+                        div.innerHTML = `<input type="hidden" name="rp_slug[${i}]" value="">
+                            <input type="text" name="rp_name[${i}]" placeholder="Product name" class="col-span-12 sm:col-span-5 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-white font-bold outline-none">
+                            <input type="number" min="0" name="rp_api[${i}]" value="0" class="col-span-4 sm:col-span-2 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-cyan-300 font-bold text-center outline-none">
+                            <input type="text" name="rp_token[${i}]" placeholder="token (optional)" class="col-span-5 sm:col-span-3 min-w-0 bg-[#030612] border border-slate-800 p-2 rounded-lg text-purple-300 outline-none font-mono text-[10px]">
+                            <select name="rp_provider[${i}]" class="col-span-12 bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-[10px] font-bold text-cyan-300 outline-none order-last"><option value="keymanager">Provider: KeyManager (api_id)</option><option value="crackmaster">Provider: Crack Master</option></select>
+                            <label class="col-span-2 sm:col-span-1 flex items-center justify-center gap-1 text-[10px] text-emerald-300 font-bold"><input type="checkbox" name="rp_enabled[${i}]" value="1" checked class="rounded"> ON</label>
+                            <button type="button" onclick="this.closest('.rp-edit-row').remove()" class="col-span-1 text-red-400 text-sm">✕</button>`;
+                        document.getElementById('rpEditRows').appendChild(div);
+                        div.querySelector('input[type=text]').focus();
+                    }
+                </script>
+            </div>
             <div class="box-panel p-5 space-y-5 border-cyan-500/20">
                 <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                     <h3 class="text-xs font-black text-cyan-300 uppercase tracking-wider flex items-center gap-2">
@@ -3569,16 +3817,16 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                 ?>
                 <div class="p-3.5 rounded-2xl border text-xs font-sans space-y-2 <?= $fbOwn ? 'border-emerald-500/30 bg-emerald-950/20' : 'border-cyan-500/30 bg-cyan-950/20' ?>">
                     <div class="font-black <?= $fbOwn ? 'text-emerald-300' : 'text-cyan-300' ?>">
-                        <?= $fbOwn ? '✅ This store uses its OWN Firebase for Gmail login' : 'ℹ️ This store uses the MAIN site Gmail login (no setup needed)' ?>
+                        <?= $fbOwn ? '✅ Gmail login is ON for this store (your Firebase)' : '⛔ Gmail login is OFF — paste your Firebase config below and Save' ?>
                     </div>
                     <?php if ($fbOwn): ?>
                     <ol class="list-decimal ml-4 space-y-1 text-slate-300">
                         <li>Firebase Console → <b>Authentication → Sign-in method → Google → Enable</b></li>
                         <li>Authentication → <b>Settings → Authorized domains → Add domain</b>: <code class="text-amber-300 select-all"><?= htmlspecialchars($fbStoreDomain) ?></code></li>
-                        <li>এই দুটো না করলে Gmail লগইন কাজ করবে না (তখন অটো মেইন সাইটের লগইন ব্যবহার হবে)।</li>
+                        <li>এই দুটো না করলে Gmail লগইন কাজ করবে না।</li>
                     </ol>
                     <?php else: ?>
-                    <p class="text-slate-400">নিজের Firebase দিতে চাইলে নিচে config পেস্ট করে Save করুন।</p>
+                    <p class="text-slate-400">নিচে Firebase config পেস্ট করে Save করলেই আপনার স্টোরে Gmail লগইন চালু হবে। তারপর Firebase এ Google Enable ও <code class="text-amber-300 select-all"><?= htmlspecialchars($fbStoreDomain) ?></code> Authorized domain এ যোগ করুন।</p>
                     <?php endif; ?>
                 </div>
 
@@ -3629,7 +3877,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                         SAVE FIREBASE CONFIGURATION
                     </button>
                     <?php if ($fbOwn): ?>
-                    <button type="submit" name="firebase_use_main" value="1" onclick="return confirm('Remove this store\'s Firebase and use the main site Gmail login?');" class="w-full py-2.5 rounded-xl bg-slate-800 text-slate-300 uppercase text-[11px] font-black">Use main site Gmail login instead</button>
+                    <button type="submit" name="firebase_use_main" value="1" onclick="return confirm('Turn OFF Gmail login for this store (remove Firebase config)?');" class="w-full py-2.5 rounded-xl bg-slate-800 text-slate-300 uppercase text-[11px] font-black">Turn off Gmail login</button>
                     <?php endif; ?>
                 </form>
             </div>

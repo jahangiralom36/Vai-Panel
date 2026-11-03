@@ -297,17 +297,33 @@ if (!function_exists('vpDefaultResetProducts')) {
 // 🔄 RESET API — URL + API key আসে Mother Panel (system_settings) বা config.php (RESET_API_KEY) থেকে।
 // কোডে কোনো গোপন কি রাখা হয় না। উত্তর JSON/টেক্সট যেকোনো ফরম্যাটে বোঝে।
 // ====================================================================
+if (!function_exists('vpStoreSettingsGet')) {
+    // 🔒 প্রতিটা স্টোরের নিজের সেটিং: মেইন = system_settings (Mother Panel), সাব = subdomain_settings (Sub Admin Panel)
+    function vpStoreSettingsGet(PDO $pdo, int $subId, array $keys): array {
+        if (!$keys) return [];
+        $in = implode(',', array_fill(0, count($keys), '?'));
+        try {
+            if ($subId > 0) {
+                $st = $pdo->prepare("SELECT setting_key, setting_value FROM subdomain_settings WHERE subdomain_id = ? AND setting_key IN ($in)");
+                $st->execute(array_merge([$subId], $keys));
+            } else {
+                $st = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ($in)");
+                $st->execute($keys);
+            }
+            return $st->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+        } catch (Throwable $e) { return []; }
+    }
+}
 if (!function_exists('vpResetApiConfig')) {
-    function vpResetApiConfig(PDO $pdo): array {
+    function vpResetApiConfig(PDO $pdo, int $subId = 0): array {
         $cfg = [
             'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
-            'api_key' => defined('RESET_API_KEY') ? (string)RESET_API_KEY : '',
+            'api_key' => ($subId === 0 && defined('RESET_API_KEY')) ? (string)RESET_API_KEY : '',
             'cm_url'  => 'https://crackmaster.shop/reseller_api.php?action=reset_key',
-            'cm_key'  => defined('CRACKMASTER_API_KEY') ? (string)CRACKMASTER_API_KEY : '',
+            'cm_key'  => ($subId === 0 && defined('CRACKMASTER_API_KEY')) ? (string)CRACKMASTER_API_KEY : '',
         ];
         try {
-            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key')");
-            foreach (($st ? $st->fetchAll(PDO::FETCH_KEY_PAIR) : []) as $k => $v) {
+            foreach (vpStoreSettingsGet($pdo, $subId, ['reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key']) as $k => $v) {
                 $v = trim((string)$v);
                 if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
                 if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
@@ -357,14 +373,10 @@ if (!function_exists('vpCallResetApi')) {
     }
 }
 if (!function_exists('vpGetResetProducts')) {
-    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false): array {
+    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false, int $subId = 0): array {
         $list = null;
-        try {
-            $st = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'reset_api_products' LIMIT 1");
-            $st->execute();
-            $raw = $st->fetchColumn();
-            if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
-        } catch (Throwable $e) {}
+        $raw = vpStoreSettingsGet($pdo, $subId, ['reset_api_products'])['reset_api_products'] ?? '';
+        if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
         if ($list === null) $list = vpDefaultResetProducts();
         // পুরনো সেভ করা লিস্ট (provider ফিল্ড নেই) → Crack Master নিজে থেকে যোগ হবে
         $hasProviderField = false;
@@ -1040,7 +1052,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $toast = ['type' => 'success', 'msg' => 'Reset products saved (' . count($newList) . ' items)!'];
     }
 
-    // 🔄 RESET API SETTINGS (URL + API KEY) — মেইন ও সব সাব-ডোমেইনের রিসেট এই কি দিয়ে হয়
+    // 🔄 RESET API SETTINGS (URL + API KEY) — শুধু মেইন ডোমেইনের রিসেট (সাব-ডোমেইন নিজের Sub Admin থেকে সেট করে)
     if ($act === 'save_reset_api_settings') {
         $rUrl = trim((string)($_POST['reset_api_url'] ?? ''));
         if ($rUrl === '' || !filter_var($rUrl, FILTER_VALIDATE_URL)) $rUrl = 'https://keymanager.shop/api.php';
@@ -1054,7 +1066,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         $stRs->execute(['crackmaster_reset_url', $cmUrl, $cmUrl]);
         $cmKey = trim((string)($_POST['crackmaster_api_key'] ?? ''));
         if ($cmKey !== '') $stRs->execute(['crackmaster_api_key', $cmKey, $cmKey]);
-        $toast = ['type' => 'success', 'msg' => '✅ Reset API settings saved (main + all sub domains)'];
+        $toast = ['type' => 'success', 'msg' => '✅ Reset API settings saved (main domain)'];
     }
 
     if ($act === 'test_reset_api') {
@@ -3525,7 +3537,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
             <div class="box-panel p-5 space-y-4 border-emerald-500/30">
                 <div class="pb-3 border-b border-slate-800">
                     <h3 class="text-xs font-black text-emerald-400 uppercase tracking-wider flex items-center gap-2"><i class="fa-solid fa-arrows-rotate"></i> RESET PAGE PRODUCTS (HWID RESET API)</h3>
-                    <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">স্টোরের Reset পেজে "Step 1 — Select Product" এ এই প্রোডাক্টগুলো আসবে (মেইন + সব সাব-স্টোর)। প্রতিটার KeyManager API ID দিন। API ID 0 হলে Connect Key Manager এর ডিফল্ট API দিয়ে রিসেট হবে।</span>
+                    <span class="text-[10px] text-slate-400 font-sans mt-0.5 block">স্টোরের Reset পেজে "Step 1 — Select Product" এ এই প্রোডাক্টগুলো আসবে (শুধু মেইন ডোমেইন)। প্রতিটার KeyManager API ID দিন। API ID 0 হলে Connect Key Manager এর ডিফল্ট API দিয়ে রিসেট হবে।</span>
                 </div>
                 <?php $rsCfg = vpResetApiConfig($pdo); $rsKeySet = $rsCfg['api_key'] !== ''; ?>
                 <form method="POST" class="bg-slate-900/80 p-3 rounded-2xl border border-slate-800 space-y-2.5 text-xs">
@@ -3543,7 +3555,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         <button type="submit" class="flex-1 py-2.5 btn-cyan rounded-xl uppercase text-[11px] font-black">💾 Save Reset API</button>
                         <button type="submit" name="admin_action" value="test_reset_api" class="px-4 py-2.5 rounded-xl bg-amber-500/15 text-amber-300 border border-amber-500/30 uppercase text-[11px] font-black">Test</button>
                     </div>
-                    <span class="text-[10px] text-slate-500 font-sans block">রিসেট URL: <code class="text-cyan-300">?action=reset_key&amp;api_id=ID&amp;key=KEY&amp;api_key=…</code> — মেইন ও সব সাব-ডোমেইনের Reset পেজ এটা ব্যবহার করে।</span>
+                    <span class="text-[10px] text-slate-500 font-sans block">রিসেট URL: <code class="text-cyan-300">?action=reset_key&amp;api_id=ID&amp;key=KEY&amp;api_key=…</code> — শুধু মেইন ডোমেইনের Reset পেজ এটা ব্যবহার করে।</span>
                     <div class="pt-2 border-t border-slate-800 space-y-2">
                         <span class="text-white font-bold block">🔓 Crack Master Reset</span>
                         <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">

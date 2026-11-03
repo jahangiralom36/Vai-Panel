@@ -221,16 +221,9 @@ if (!$tenant) {
         $tenantSettings = $stmtTS->fetchAll(PDO::FETCH_KEY_PAIR);
         if (!empty($tenantSettings)) $settings = array_merge($settings, $tenantSettings);
 
-        // 💱 সাব-ডোমেইন নিজের রেট সেট না করলে মাদার প্যানেলের রেট (BDT / INR) ব্যবহার হবে
-        try {
-            $stmtMotherRates = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('usdt_rate', 'inr_rate', 'binance_market_rate')");
-            $motherRates = $stmtMotherRates ? $stmtMotherRates->fetchAll(PDO::FETCH_KEY_PAIR) : [];
-            foreach (['usdt_rate', 'inr_rate', 'binance_market_rate'] as $__rk) {
-                if ((!isset($tenantSettings[$__rk]) || (float)$tenantSettings[$__rk] <= 0) && !empty($motherRates[$__rk])) {
-                    $settings[$__rk] = $motherRates[$__rk];
-                }
-            }
-        } catch (Throwable $e) {}
+        // 🔒 সাব-ডোমেইনের নিজের Key Manager না থাকলে মেইনের ডিফল্ট Key Manager ব্যবহার হবে না
+        if (empty($tenantSettings['km_api_url'])) $settings['km_api_url'] = '';
+        if (empty($tenantSettings['km_api_key'])) $settings['km_api_key'] = '';
 
         // Ensure tenant support telegram/whatsapp overrides from subdomains table
         if (!empty($tenant['support_telegram'])) $settings['support_telegram'] = $tenant['support_telegram'];
@@ -268,103 +261,10 @@ $maintenanceTgLink = !empty($settings['maintenance_telegram_link'])
 
 $effectiveTutorialLink = $tenantTelegram;
 
-// 🔐 মেইন স্টোরের Firebase/Google কনফিগ (সাব-ডোমেইনে নিজের না থাকলে এটা দিয়ে Gmail লগইন হয়)
-$mainFirebaseCfg = [];
-try {
-    $stMF = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('firebase_api_key','firebase_auth_domain','firebase_project_id','firebase_storage_bucket','firebase_messaging_sender_id','firebase_app_id','google_client_id')");
-    $mainFirebaseCfg = $stMF ? $stMF->fetchAll(PDO::FETCH_KEY_PAIR) : [];
-} catch (Throwable $e) {}
-$mainHasFirebase   = !empty($mainFirebaseCfg['firebase_api_key']) && !empty($mainFirebaseCfg['firebase_project_id']);
-$vpGoogleBridgeUrl = '';
-$vpGoogleBridgeFallback = '';
-
-// 🔐 GOOGLE LOGIN BRIDGE (শুধু মেইন ডোমেইনে): সাব-ডোমেইন থেকে খোলা ছোট উইন্ডো — এখানে Google অ্যাকাউন্ট সিলেক্ট করলে
-// যাচাইযোগ্য Firebase টোকেন শুধু সেই সাব-ডোমেইনে (যেটা থেকে খোলা হয়েছে) পাঠানো হয়।
-if (isset($_GET['vp_google_bridge']) && !$tenant) {
-    $brOrigin = (string)($_GET['origin'] ?? '');
-    $brParts  = parse_url($brOrigin);
-    $brHost   = strtolower((string)($brParts['host'] ?? ''));
-    $brOk     = false;
-    if (in_array($brParts['scheme'] ?? '', ['http', 'https'], true) && $brHost !== '' && substr($brHost, -strlen('.' . $mainDomain)) === '.' . $mainDomain) {
-        $brSlug = substr($brHost, 0, -strlen('.' . $mainDomain));
-        try {
-            $stBr = $pdo->prepare("SELECT site_title FROM subdomains WHERE LOWER(TRIM(subdomain)) = ? AND (status IS NULL OR LOWER(status) != 'suspended') LIMIT 1");
-            $stBr->execute([$brSlug]);
-            $brTitle = $stBr->fetchColumn();
-            $brOk = $brTitle !== false;
-        } catch (Throwable $e) {}
-    }
-    $brOrigin = $brOk ? (($brParts['scheme']) . '://' . $brHost . (isset($brParts['port']) ? ':' . (int)$brParts['port'] : '')) : '';
-    $brCfg = [
-        'apiKey' => $mainFirebaseCfg['firebase_api_key'] ?? '', 'authDomain' => $mainFirebaseCfg['firebase_auth_domain'] ?? '',
-        'projectId' => $mainFirebaseCfg['firebase_project_id'] ?? '', 'appId' => $mainFirebaseCfg['firebase_app_id'] ?? '',
-        'messagingSenderId' => $mainFirebaseCfg['firebase_messaging_sender_id'] ?? '', 'storageBucket' => $mainFirebaseCfg['firebase_storage_bucket'] ?? '',
-    ];
-    while (ob_get_level()) { ob_end_clean(); }
-    header('Content-Type: text/html; charset=utf-8');
-    header('X-Frame-Options: DENY');
-    ?><!DOCTYPE html>
-<html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Sign in with Google</title>
-<style>
-  *{box-sizing:border-box;margin:0;padding:0} body{min-height:100vh;display:flex;align-items:center;justify-content:center;background:#04010a;color:#e5e7eb;font-family:-apple-system,Segoe UI,Roboto,sans-serif;padding:20px}
-  .card{width:100%;max-width:360px;background:linear-gradient(180deg,#110724,#06020c);border:1.5px solid rgba(0,245,255,.35);border-radius:22px;padding:26px 20px;text-align:center;box-shadow:0 0 24px rgba(168,85,247,.25)}
-  h1{font-size:16px;font-weight:800;color:#fff;margin-bottom:6px} p{font-size:12px;color:#a78bfa;margin-bottom:18px} .store{color:#22d3ee;font-weight:800}
-  button{width:100%;display:flex;align-items:center;justify-content:center;gap:10px;background:#fff;color:#1f2937;border:0;border-radius:14px;padding:14px;font-size:14px;font-weight:700;cursor:pointer}
-  button:disabled{opacity:.6} .msg{margin-top:14px;font-size:12px;min-height:16px} .err{color:#fda4af} .ok{color:#86efac}
-</style></head><body>
-<div class="card">
-  <h1>Continue with Google</h1>
-  <p>Login to <span class="store"><?= htmlspecialchars($brOk ? ((string)$brTitle ?: $brHost) : 'store') ?></span></p>
-  <?php if (!$brOk || empty($brCfg['apiKey'])): ?>
-    <div class="msg err">This login link is not valid. Please close this window and try again from the store.</div>
-  <?php else: ?>
-    <button id="g" type="button" onclick="vpGo()"><svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.8-2.4 3.66v3.05h3.87c2.26-2.09 3.67-5.17 3.67-9.15z"/><path fill="#34A853" d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.87-3.05c-1.08.72-2.45 1.16-4.06 1.16-3.13 0-5.78-2.11-6.73-4.96H1.26v3.15C3.25 21.36 7.31 24 12 24z"/><path fill="#FBBC05" d="M5.27 14.24c-.25-.72-.38-1.49-.38-2.24s.13-1.52.38-2.24V6.61H1.26C.46 8.23 0 10.06 0 12s.46 3.77 1.26 5.39l4.01-3.15z"/><path fill="#EA4335" d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.31 0 3.25 2.64 1.26 6.61l4.01 3.15c.95-2.85 3.6-4.96 6.73-4.96z"/></svg><span>Select Google Account</span></button>
-    <div id="m" class="msg"></div>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js"></script>
-    <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js"></script>
-    <script>
-      const VP_TARGET = <?= json_encode($brOrigin) ?>;
-      const m = document.getElementById('m'), b = document.getElementById('g');
-      function say(t, ok) { m.textContent = t; m.className = 'msg ' + (ok ? 'ok' : 'err'); }
-      try { firebase.initializeApp(<?= json_encode($brCfg) ?>); } catch (e) {}
-      async function vpGo() {
-        if (!window.opener) { say('Please open this from the store login button.'); return; }
-        b.disabled = true; say('', true);
-        try {
-          const p = new firebase.auth.GoogleAuthProvider();
-          p.addScope('email'); p.addScope('profile'); p.setCustomParameters({ prompt: 'select_account' });
-          const r = await firebase.auth().signInWithPopup(p);
-          const token = await r.user.getIdToken();
-          window.opener.postMessage({ type: 'vp-google-token', idToken: token }, VP_TARGET);
-          say('✅ Done! Returning to the store…', true);
-          await firebase.auth().signOut().catch(() => {});
-          setTimeout(() => window.close(), 400);
-        } catch (e) {
-          b.disabled = false;
-          say(e && e.code === 'auth/popup-blocked' ? 'Popup blocked — please tap the button again.' : (e && e.code === 'auth/popup-closed-by-user' ? 'Cancelled. Tap the button to choose an account.' : 'Google login failed. Please try again.'));
-        }
-      }
-    </script>
-  <?php endif; ?>
-</div></body></html><?php
-    exit;
-}
-
+// 🔒 Gmail লগইন: মেইন ডোমেইন = Mother Panel এর Firebase, সাব-ডোমেইন = শুধু Sub Admin Panel এর Firebase (কোনো যোগসূত্র নেই)
 if ($tenant) {
     $hasTenantFirebase = !empty($settings['firebase_api_key']) && !empty($settings['firebase_project_id']);
     $isFirebaseEnabled = $hasTenantFirebase;
-    if ($mainHasFirebase) {
-        // মেইন সাইটের Google লগইন — সাব-স্টোরের নিজের Firebase কাজ না করলে ব্যাকআপ হিসেবে
-        $vpScheme0 = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') ? 'https' : 'http';
-        $vpGoogleBridgeFallback = (defined('VP_MAIN_ORIGIN') ? rtrim((string)VP_MAIN_ORIGIN, '/') : $vpScheme0 . '://' . $mainDomain) . '/index.php?vp_google_bridge=1';
-    }
-    if (!$hasTenantFirebase && $mainHasFirebase) {
-        // সাব-ডোমেইন: মেইন ডোমেইনের ছোট উইন্ডোতে Google অ্যাকাউন্ট সিলেক্ট → যাচাই করা লগইন সাব-ডোমেইনে ফেরত আসে
-        $isFirebaseEnabled = true;
-        $vpScheme = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https') ? 'https' : 'http';
-        $vpGoogleBridgeUrl = (defined('VP_MAIN_ORIGIN') ? rtrim((string)VP_MAIN_ORIGIN, '/') : $vpScheme . '://' . $mainDomain) . '/index.php?vp_google_bridge=1';
-    }
 
     $tenantSpinCount = 0;
     try {
@@ -536,17 +436,33 @@ if (!function_exists('vpDefaultResetProducts')) {
 // 🔄 RESET API — URL + API key আসে Mother Panel (system_settings) বা config.php (RESET_API_KEY) থেকে।
 // কোডে কোনো গোপন কি রাখা হয় না। উত্তর JSON/টেক্সট যেকোনো ফরম্যাটে বোঝে।
 // ====================================================================
+if (!function_exists('vpStoreSettingsGet')) {
+    // 🔒 প্রতিটা স্টোরের নিজের সেটিং: মেইন = system_settings (Mother Panel), সাব = subdomain_settings (Sub Admin Panel)
+    function vpStoreSettingsGet(PDO $pdo, int $subId, array $keys): array {
+        if (!$keys) return [];
+        $in = implode(',', array_fill(0, count($keys), '?'));
+        try {
+            if ($subId > 0) {
+                $st = $pdo->prepare("SELECT setting_key, setting_value FROM subdomain_settings WHERE subdomain_id = ? AND setting_key IN ($in)");
+                $st->execute(array_merge([$subId], $keys));
+            } else {
+                $st = $pdo->prepare("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ($in)");
+                $st->execute($keys);
+            }
+            return $st->fetchAll(PDO::FETCH_KEY_PAIR) ?: [];
+        } catch (Throwable $e) { return []; }
+    }
+}
 if (!function_exists('vpResetApiConfig')) {
-    function vpResetApiConfig(PDO $pdo): array {
+    function vpResetApiConfig(PDO $pdo, int $subId = 0): array {
         $cfg = [
             'api_url' => defined('RESET_API_URL') ? (string)RESET_API_URL : 'https://keymanager.shop/api.php',
-            'api_key' => defined('RESET_API_KEY') ? (string)RESET_API_KEY : '',
+            'api_key' => ($subId === 0 && defined('RESET_API_KEY')) ? (string)RESET_API_KEY : '',
             'cm_url'  => 'https://crackmaster.shop/reseller_api.php?action=reset_key',
-            'cm_key'  => defined('CRACKMASTER_API_KEY') ? (string)CRACKMASTER_API_KEY : '',
+            'cm_key'  => ($subId === 0 && defined('CRACKMASTER_API_KEY')) ? (string)CRACKMASTER_API_KEY : '',
         ];
         try {
-            $st = $pdo->query("SELECT setting_key, setting_value FROM system_settings WHERE setting_key IN ('reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key')");
-            foreach (($st ? $st->fetchAll(PDO::FETCH_KEY_PAIR) : []) as $k => $v) {
+            foreach (vpStoreSettingsGet($pdo, $subId, ['reset_api_url', 'reset_api_key', 'crackmaster_reset_url', 'crackmaster_api_key']) as $k => $v) {
                 $v = trim((string)$v);
                 if ($k === 'reset_api_url' && filter_var($v, FILTER_VALIDATE_URL)) $cfg['api_url'] = $v;
                 if ($k === 'reset_api_key' && $v !== '' && $v !== '0') $cfg['api_key'] = $v;
@@ -596,14 +512,10 @@ if (!function_exists('vpCallResetApi')) {
     }
 }
 if (!function_exists('vpGetResetProducts')) {
-    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false): array {
+    function vpGetResetProducts(PDO $pdo, bool $onlyEnabled = false, int $subId = 0): array {
         $list = null;
-        try {
-            $st = $pdo->prepare("SELECT setting_value FROM system_settings WHERE setting_key = 'reset_api_products' LIMIT 1");
-            $st->execute();
-            $raw = $st->fetchColumn();
-            if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
-        } catch (Throwable $e) {}
+        $raw = vpStoreSettingsGet($pdo, $subId, ['reset_api_products'])['reset_api_products'] ?? '';
+        if ($raw) { $dec = json_decode((string)$raw, true); if (is_array($dec)) $list = $dec; }
         if ($list === null) $list = vpDefaultResetProducts();
         // পুরনো সেভ করা লিস্ট (provider ফিল্ড নেই) → Crack Master নিজে থেকে যোগ হবে
         $hasProviderField = false;
@@ -853,9 +765,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
 
         if ($_POST['auth_action'] === 'firebase_auth') {
             // সাব-স্টোরের নিজের Firebase থাকলে সেটা, নাহলে মেইন স্টোরের Firebase দিয়ে যাচাই
-            $verified = vpVerifyFirebaseIdToken((string)($_POST['id_token'] ?? ''), [$settings['firebase_api_key'] ?? '', $mainFirebaseCfg['firebase_api_key'] ?? '']);
+            $verified = vpVerifyFirebaseIdToken((string)($_POST['id_token'] ?? ''), [$settings['firebase_api_key'] ?? '']);
         } elseif (!empty($_POST['credential'])) {
-            $gClient = trim((string)($settings['google_client_id'] ?? '')) ?: trim((string)($mainFirebaseCfg['google_client_id'] ?? ''));
+            $gClient = trim((string)($settings['google_client_id'] ?? ''));
             $verified = vpVerifyGoogleCredential((string)$_POST['credential'], $gClient);
         }
 
@@ -2211,7 +2123,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
     // ── Step 1: সিলেক্ট করা রিসেট প্রোডাক্ট (Mother Panel এর লিস্ট থেকে) ──
     $resetSlug = trim((string)($_POST['reset_product'] ?? ''));
     $chosenReset = null;
-    foreach (vpGetResetProducts($pdo, true) as $__rp) {
+    foreach (vpGetResetProducts($pdo, true, $currentSubdomainId) as $__rp) {
         if ($__rp['slug'] === $resetSlug) { $chosenReset = $__rp; break; }
     }
     if (!$chosenReset) {
@@ -2246,7 +2158,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
 
     if (($chosenReset['provider'] ?? 'keymanager') === 'crackmaster') {
         // 🔓 CRACK MASTER: POST license_key → crackmaster.shop/reseller_api.php?action=reset_key
-        $cfgCm = vpResetApiConfig($pdo);
+        $cfgCm = vpResetApiConfig($pdo, $currentSubdomainId);
         $cmFields = ['license_key' => $rawKey];
         if ($cfgCm['cm_key'] !== '') $cmFields['api_key'] = $cfgCm['cm_key'];
         $res = vpCallResetApi($cfgCm['cm_url'], $cmFields);
@@ -2262,7 +2174,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
         if (stripos($endpoint, '.php') === false) $endpoint .= '/api.php';
         $res = vpCallResetApi($endpoint . '?' . http_build_query(['action' => 'reset_key', 'key' => $rawKey, 'license_key' => $rawKey, 'api_key' => $kmKey]));
     } else {
-        $cfg = vpResetApiConfig($pdo);
+        $cfg = vpResetApiConfig($pdo, $currentSubdomainId);
         if ($cfg['api_key'] === '') {
             echo json_encode(['status' => 'error', 'message' => 'Reset API key is not configured yet. Please contact support.']);
             exit;
@@ -3015,7 +2927,7 @@ try {
 $initialDeepLinkProdId = isset($_GET['prod']) ? (int)$_GET['prod'] : (isset($_GET['product']) ? (int)$_GET['product'] : 0);
 
 $firebaseClientConfig = [];
-if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
+if ($isFirebaseEnabled) {
     $firebaseClientConfig = [
         'apiKey'            => $settings['firebase_api_key'] ?? '',
         'authDomain'        => trim((string)($settings['firebase_auth_domain'] ?? '')) ?: (trim((string)($settings['firebase_project_id'] ?? '')) . '.firebaseapp.com'),
@@ -3059,7 +2971,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
 
     <!-- ⚡ SPEED: non-critical scripts no longer block page rendering -->
     <script src="https://accounts.google.com/gsi/client" async defer></script>
-    <?php if ($isFirebaseEnabled && $vpGoogleBridgeUrl === ''): ?>
+    <?php if ($isFirebaseEnabled): ?>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-app-compat.js" defer></script>
     <script src="https://www.gstatic.com/firebasejs/10.8.0/firebase-auth-compat.js" defer></script>
     <?php endif; ?>
@@ -4307,7 +4219,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
         </section>
 
         <!-- 6C. RESET HWID TAB — সহজ ৩ স্টেপ: প্রোডাক্ট → কি → রিসেট -->
-        <?php $resetApiProducts = vpGetResetProducts($pdo, true); ?>
+        <?php $resetApiProducts = vpGetResetProducts($pdo, true, $currentSubdomainId); ?>
         <section id="page-resetkey" class="page-section hidden w-full font-sans">
             <div class="rk-card">
                 <div class="text-center space-y-1 pb-1">
@@ -5863,9 +5775,6 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
             }
         }
         // 🔐 Google লগইন: সার্ভারে শুধু Google এর টোকেন যায় (ইমেইল নয়) — সার্ভার নিজে Google এ যাচাই করে
-        const VP_GOOGLE_BRIDGE = <?= json_encode($vpGoogleBridgeUrl) ?>;
-        const VP_GOOGLE_BRIDGE_FALLBACK = <?= json_encode($vpGoogleBridgeFallback) ?>;
-        let vpForceGoogleBridge = false;
         async function vpSendGoogleToken(idToken) {
             showToast('Verifying Google account...', 'success');
             const formData = new FormData();
@@ -5880,23 +5789,7 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                 } else showToast(data.message || 'Login failed!', 'error');
             } catch (e) { showToast('Network error!', 'error'); }
         }
-        function openGoogleBridge() {
-            // সাব-ডোমেইন: মেইন ডোমেইনের ছোট উইন্ডোতে অ্যাকাউন্ট সিলেক্ট
-            const bridgeUrl = VP_GOOGLE_BRIDGE || VP_GOOGLE_BRIDGE_FALLBACK;
-            if (!bridgeUrl) { showToast('Google login is not available on this store.', 'error'); return; }
-            const w = window.open(bridgeUrl + '&origin=' + encodeURIComponent(window.location.origin), 'vpGoogleLogin', 'width=440,height=620');
-            if (!w) { showToast('Please allow popups to continue with Google', 'error'); return; }
-            const bridgeOrigin = new URL(bridgeUrl).origin;
-            const onMsg = (ev) => {
-                if (ev.origin !== bridgeOrigin || !ev.data || ev.data.type !== 'vp-google-token' || !ev.data.idToken) return;
-                window.removeEventListener('message', onMsg);
-                vpSendGoogleToken(ev.data.idToken);
-            };
-            window.addEventListener('message', onMsg);
-        }
         async function handleUnifiedGoogleLogin() {
-            if (VP_GOOGLE_BRIDGE || vpForceGoogleBridge) { openGoogleBridge(); return; }
-            if (!(firebaseAuthInitialized && typeof firebase !== 'undefined' && firebase.auth) && VP_GOOGLE_BRIDGE_FALLBACK) { openGoogleBridge(); return; }
             if (firebaseAuthInitialized && typeof firebase !== 'undefined' && firebase.auth) {
                 try {
                     const provider = new firebase.auth.GoogleAuthProvider();
@@ -5911,11 +5804,6 @@ if ($isFirebaseEnabled && $vpGoogleBridgeUrl === '') {
                 } catch (err) {
                     if (err && err.code === 'auth/popup-blocked') showToast('Popup was blocked by browser! Please allow popups.', 'error');
                     else if (err && err.code === 'auth/popup-closed-by-user') showToast('Google login cancelled.', 'error');
-                    else if (VP_GOOGLE_BRIDGE_FALLBACK && err && /unauthorized-domain|operation-not-allowed|invalid-api-key|api-key-not-valid|configuration-not-found|internal-error|argument-error|network-request-failed/.test(err.code || '')) {
-                        // এই স্টোরের Firebase ঠিকমতো সেট না → মেইন সাইটের Google লগইন দিয়ে চেষ্টা
-                        vpForceGoogleBridge = true;
-                        showToast('Please tap "Continue with Google" once more to login.', 'success');
-                    }
                     else if (err && err.code === 'auth/unauthorized-domain') showToast('This domain is not authorized in Firebase. Please contact support.', 'error');
                     else showToast('Google login failed. Please try again.', 'error');
                 }
