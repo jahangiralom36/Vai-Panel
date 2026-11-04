@@ -2916,13 +2916,13 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'get_live_history_
     try {
         $stmtS1 = $pdo->prepare("SELECT u.username, u.avatar_url, SUM(l.price) as spent 
             FROM licenses l JOIN users u ON l.user_id = u.id 
-            WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 30");
+            WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 20");
         $stmtS1->execute([$currentSubdomainId]);
         $syncTop = $stmtS1->fetchAll(PDO::FETCH_ASSOC);
 
         $stmtS2 = $pdo->prepare("SELECT l.validity, l.price, l.created_at, u.username, u.avatar_url 
             FROM licenses l JOIN users u ON l.user_id = u.id 
-            WHERE l.subdomain_id = ? ORDER BY l.id DESC LIMIT 30");
+            WHERE l.subdomain_id = ? ORDER BY l.id DESC LIMIT 20");
         $stmtS2->execute([$currentSubdomainId]);
         $syncRecent = $stmtS2->fetchAll(PDO::FETCH_ASSOC);
     } catch (Throwable $e) {}
@@ -2940,7 +2940,7 @@ $topBuyers = [];
 try {
     $stmtLB = $pdo->prepare("SELECT u.username, u.avatar_url, SUM(l.price) as spent 
         FROM licenses l JOIN users u ON l.user_id = u.id 
-        WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 30");
+        WHERE l.subdomain_id = ? GROUP BY u.id, u.username, u.avatar_url ORDER BY spent DESC LIMIT 20");
     $stmtLB->execute([$currentSubdomainId]);
     $topBuyers = $stmtLB->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {}
@@ -2951,7 +2951,7 @@ try {
         FROM licenses l 
         JOIN users u ON l.user_id = u.id 
         WHERE l.subdomain_id = ? 
-        ORDER BY l.id DESC LIMIT 30");
+        ORDER BY l.id DESC LIMIT 20");
     $stmtRO->execute([$currentSubdomainId]);
     $recentOrdersList = $stmtRO->fetchAll(PDO::FETCH_ASSOC);
 } catch (Throwable $e) {}
@@ -3437,6 +3437,28 @@ if ($isFirebaseEnabled) {
             box-shadow: 0 4px 15px rgba(0, 245, 255, 0.15);
         }
         .b-member-card:last-child { margin-bottom: 0; }
+        /* 🛠️ display:flex যেন hidden কে ওভাররাইড না করে — মোবাইলে সব অর্ডার দেখানোর বাগ ফিক্স */
+        .b-member-card.hidden { display: none !important; }
+        /* 📋 More পপআপ (সর্বোচ্চ ২০টা) */
+        #vpHistModal { position: fixed; inset: 0; z-index: 90; display: none; align-items: flex-end; justify-content: center; background: rgba(2,0,10,.72); backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px); }
+        #vpHistModal.open { display: flex; }
+        #vpHistModal .vp-hm-sheet { width: 100%; max-width: 480px; max-height: 82vh; display: flex; flex-direction: column; background: linear-gradient(180deg,#120628,#07020f); border: 1px solid rgba(217,70,239,.35); border-bottom: 0; border-radius: 26px 26px 0 0; box-shadow: 0 -10px 40px rgba(217,70,239,.25); animation: vpHmUp .28s ease-out; }
+        @media (min-width: 640px) { #vpHistModal { align-items: center; } #vpHistModal .vp-hm-sheet { border-radius: 26px; border-bottom: 1px solid rgba(217,70,239,.35); } }
+        #vpHistModal .vp-hm-grab { width: 44px; height: 5px; border-radius: 9px; background: rgba(255,255,255,.18); margin: 10px auto 2px; }
+        #vpHistModal .vp-hm-head { display: flex; align-items: center; justify-content: space-between; padding: 8px 16px 12px; border-bottom: 1px solid rgba(255,255,255,.06); }
+        #vpHistModal .vp-hm-title { font-weight: 900; font-size: 14px; letter-spacing: .06em; text-transform: uppercase; color: #fff; display: flex; align-items: center; gap: 8px; }
+        #vpHistModal .vp-hm-count { font-size: 10px; font-weight: 800; color: #67e8f9; background: rgba(0,245,255,.1); border: 1px solid rgba(0,245,255,.3); padding: 2px 8px; border-radius: 99px; }
+        #vpHistModal .vp-hm-close { width: 34px; height: 34px; border-radius: 12px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.1); color: #e5e7eb; display: flex; align-items: center; justify-content: center; }
+        #vpHistModal .vp-hm-list { overflow-y: auto; padding: 12px 14px calc(18px + env(safe-area-inset-bottom)); overscroll-behavior: contain; }
+        #vpHistModal .vp-hm-row { display: flex; align-items: center; gap: 10px; }
+        #vpHistModal .vp-hm-rank { min-width: 26px; height: 26px; border-radius: 9px; font-size: 11px; font-weight: 900; display: flex; align-items: center; justify-content: center; background: rgba(255,255,255,.06); color: #cbd5e1; font-family: monospace; }
+        #vpHistModal .vp-hm-rank.r1 { background: linear-gradient(135deg,#facc15,#f59e0b); color: #1a1205; }
+        #vpHistModal .vp-hm-rank.r2 { background: linear-gradient(135deg,#e5e7eb,#94a3b8); color: #0f172a; }
+        #vpHistModal .vp-hm-rank.r3 { background: linear-gradient(135deg,#fb923c,#c2410c); color: #1c0a02; }
+        #vpHistModal .vp-hm-row .b-member-card { flex: 1; margin-bottom: 0; animation: vpHmIn .3s ease-out backwards; }
+        #vpHistModal .vp-hm-list > * + * { margin-top: 8px; }
+        @keyframes vpHmUp { from { transform: translateY(40px); opacity: 0; } to { transform: none; opacity: 1; } }
+        @keyframes vpHmIn { from { transform: translateY(8px); opacity: 0; } to { transform: none; opacity: 1; } }
         .b-avatar {
             width: 44px;
             height: 44px;
@@ -5442,6 +5464,18 @@ if ($isFirebaseEnabled) {
         </div>
     </div>
 
+    <!-- 📋 HISTORY MORE POPUP (Top Buyers / Recent Orders — সর্বোচ্চ ২০টা) -->
+    <div id="vpHistModal" onclick="if (event.target === this) closeHistModal()" role="dialog" aria-modal="true">
+        <div class="vp-hm-sheet">
+            <div class="vp-hm-grab"></div>
+            <div class="vp-hm-head">
+                <div class="vp-hm-title"><span id="vpHistModalTitle">Recent Orders</span> <span id="vpHistModalCount" class="vp-hm-count">0</span></div>
+                <button type="button" class="vp-hm-close" onclick="closeHistModal()" aria-label="Close" style="font-size:18px;line-height:1">&#10005;</button>
+            </div>
+            <div id="vpHistModalList" class="vp-hm-list"></div>
+        </div>
+    </div>
+
     <!-- 14. BOTTOM NAVIGATION DOCK -->
     <nav class="fixed bottom-2.5 left-1/2 -translate-x-1/2 w-[94%] max-w-sm z-40 nav-bottom-bar px-2.5 py-1.5 flex items-center justify-between font-mono">
         <button onclick="goToPage('dashboard')" id="bnav-dashboard" class="bottom-nav-btn active flex flex-col items-center flex-1 space-y-0.5">
@@ -5562,31 +5596,46 @@ if ($isFirebaseEnabled) {
             const cfg = VP_HIST[type]; if (!cfg) return;
             const box = document.getElementById(cfg.list); if (!box) return;
             const rows = Array.from(box.children).filter(el => el.classList.contains('b-member-card'));
-            const shown = Math.min(rows.length, Math.max(VP_HIST_LIMIT, vpHistShown[type] || VP_HIST_LIMIT));
-            rows.forEach((row, i) => {
-                const wasHidden = row.classList.contains('hidden');
-                row.classList.toggle('hidden', i >= shown);
-                // নতুন খোলা সারিগুলো একে একে স্মুথভাবে আসবে
-                if (wasHidden && i < shown && row.animate) {
-                    try { row.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 260, delay: Math.max(0, i - (shown - VP_HIST_STEP)) * 45, easing: 'ease-out', fill: 'backwards' }); } catch (_) {}
-                }
-            });
-            const remaining = rows.length - shown;
+            // মেইন লিস্টে সবসময় শুধু প্রথম ৩টা
+            rows.forEach((row, i) => row.classList.toggle('hidden', i >= VP_HIST_LIMIT));
             const wrap = document.getElementById(cfg.wrap);
             if (wrap) wrap.classList.toggle('hidden', rows.length <= VP_HIST_LIMIT);
             const btn = document.getElementById(cfg.btn);
-            if (btn) btn.innerHTML = remaining > 0
-                ? `<span>Show ${Math.min(VP_HIST_STEP, remaining)} More</span> <span class="text-[9px] text-cyan-500/70 normal-case">(${shown}/${rows.length})</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`
-                : `<span>Show Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>`;
-            if (type === 'top_buyers') isTopBuyersExpanded = shown > VP_HIST_LIMIT; else isRecentOrdersExpanded = shown > VP_HIST_LIMIT;
+            if (btn) btn.innerHTML = `<span>View More</span> <span class="text-[9px] text-cyan-500/80 normal-case">(${Math.min(rows.length, VP_HIST_MAX)})</span> <i class="fa-solid fa-chevron-right text-[9px]"></i>`;
+            if (type === 'top_buyers') isTopBuyersExpanded = false; else isRecentOrdersExpanded = false;
+            if (vpHistModalType === type) renderHistModal(type);
         }
-        function toggleMoreHistory(type) {
-            const cfg = VP_HIST[type]; const box = cfg && document.getElementById(cfg.list); if (!box) return;
-            const total = Array.from(box.children).filter(el => el.classList.contains('b-member-card')).length;
-            const cur = Math.min(total, vpHistShown[type] || VP_HIST_LIMIT);
-            vpHistShown[type] = (cur < total) ? Math.min(total, cur + VP_HIST_STEP) : VP_HIST_LIMIT;
-            applyHistoryVisibility(type);
+        // "More" চাপলে সুন্দর পপআপে সর্বোচ্চ ২০টা দেখাবে
+        const VP_HIST_MAX = 20;
+        let vpHistModalType = null;
+        function renderHistModal(type) {
+            const cfg = VP_HIST[type]; const box = cfg && document.getElementById(cfg.list);
+            const list = document.getElementById('vpHistModalList'); if (!box || !list) return;
+            const rows = Array.from(box.children).filter(el => el.classList.contains('b-member-card')).slice(0, VP_HIST_MAX);
+            list.innerHTML = '';
+            rows.forEach((row, i) => {
+                const wrap = document.createElement('div'); wrap.className = 'vp-hm-row';
+                const rank = document.createElement('span'); rank.className = 'vp-hm-rank' + (type === 'top_buyers' && i < 3 ? ' r' + (i + 1) : ''); rank.textContent = i + 1;
+                const card = row.cloneNode(true); card.classList.remove('hidden'); card.style.animationDelay = Math.min(i, 12) * 35 + 'ms';
+                wrap.appendChild(rank); wrap.appendChild(card); list.appendChild(wrap);
+            });
+            document.getElementById('vpHistModalTitle').innerHTML = type === 'top_buyers'
+                ? '<i class="fa-solid fa-trophy text-amber-400"></i> Top Buyers'
+                : '<i class="fa-solid fa-bolt text-cyan-400"></i> Recent Orders';
+            document.getElementById('vpHistModalCount').textContent = rows.length + (type === 'top_buyers' ? ' Buyers' : ' Orders');
         }
+        function toggleMoreHistory(type) { openHistModal(type); }
+        function openHistModal(type) {
+            const m = document.getElementById('vpHistModal'); if (!m) return;
+            vpHistModalType = type; renderHistModal(type);
+            m.classList.add('open'); document.body.style.overflow = 'hidden';
+            const l = document.getElementById('vpHistModalList'); if (l) l.scrollTop = 0;
+        }
+        function closeHistModal() {
+            const m = document.getElementById('vpHistModal'); if (!m) return;
+            m.classList.remove('open'); vpHistModalType = null; document.body.style.overflow = '';
+        }
+        document.addEventListener('keydown', e => { if (e.key === 'Escape' && vpHistModalType) closeHistModal(); });
         function vpEsc(s) { return String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
         function vpSafeImg(u) { u = String(u || ''); return /^(https?:\/\/|uploads\/|\/)[^"'<>\s]+$/i.test(u) ? u : ''; }
         let vpHistSig = { top_buyers: null, recent_orders: null };
