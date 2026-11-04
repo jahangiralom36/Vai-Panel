@@ -500,6 +500,32 @@ if (!function_exists('vpAdminDeliverOrder')) {
     }
 }
 
+if (!function_exists('vpCatKey')) {
+    // ক্যাটাগরি মিলানোর কি: "Non Root" / "NON-ROOT" / "non_root" → NONROOT
+    function vpCatKey(string $n): string {
+        $k = strtoupper(preg_replace('/[\s_\-]+/', '', trim($n)));
+        if ($k === 'NOONROOT') $k = 'NONROOT';
+        if ($k === 'IOS') $k = 'IPHONE';
+        return $k;
+    }
+}
+if (!function_exists('vpCategorySelect')) {
+    // প্রোডাক্ট ফর্মের ক্যাটাগরি ড্রপডাউন (সিরিয়াল অনুযায়ী)
+    function vpCategorySelect(array $cats, string $name, string $current, string $id = '', string $cls = ''): string {
+        $opts = []; $seen = [];
+        foreach ($cats as $c) { $n = strtoupper(trim((string)$c['name'])); if ($n === '' || isset($seen[vpCatKey($n)])) continue; $seen[vpCatKey($n)] = 1; $opts[] = $n; }
+        if (!$opts) $opts = ['NONROOT', 'ROOT', 'IPHONE', 'PC'];
+        $cur = strtoupper(trim($current));
+        if ($cur !== '' && !in_array(vpCatKey($cur), array_map('vpCatKey', $opts), true)) $opts[] = $cur;
+        $h = '<select name="' . htmlspecialchars($name) . '"' . ($id !== '' ? ' id="' . htmlspecialchars($id) . '"' : '') . ' class="' . htmlspecialchars($cls) . '">';
+        foreach ($opts as $i => $o) {
+            $sel = ($cur !== '' ? vpCatKey($o) === vpCatKey($cur) : $i === 0) ? ' selected' : '';
+            $h .= '<option value="' . htmlspecialchars($o) . '"' . $sel . '>' . ($i + 1) . '. ' . htmlspecialchars($o) . '</option>';
+        }
+        return $h . '</select>';
+    }
+}
+
 function syncStackedPricesForUser(PDO $pdo, int $userId) {
     try {
         $stmtUser = $pdo->prepare("SELECT id, role, discount_percent FROM users WHERE id = ? AND subdomain_id = 0 LIMIT 1");
@@ -1787,18 +1813,52 @@ if (!function_exists('vpNormalizeTgLink')) {
     }
 
     // --- CATEGORY SEQUENCE SAVE ---
+    // 🗂️ CATEGORY MANAGER: যোগ / নাম বদল / সিরিয়াল / চালু-বন্ধ / ডিলিট (শুধু এই স্টোর)
     if ($act === 'save_product_category') {
-        $catName  = strtoupper(trim($_POST['category_name'] ?? ''));
+        $catName  = strtoupper(preg_replace('/\s+/', ' ', trim((string)($_POST['category_name'] ?? ''))));
         $catOrder = (int)($_POST['sort_order'] ?? 0);
-        if (!empty($catName)) {
-            $pdo->prepare("INSERT INTO product_categories (subdomain_id, name, sort_order, is_active) VALUES (0, ?, ?, 1)")
-                ->execute([$catName, $catOrder]);
-            $toast = ['type' => 'success', 'msg' => "Category '$catName' added with order $catOrder!"];
+        if ($catName !== '') {
+            $dupC = $pdo->prepare("SELECT id FROM product_categories WHERE subdomain_id = ? AND REPLACE(REPLACE(REPLACE(UPPER(name),' ',''),'-',''),'_','') = ? LIMIT 1");
+            $dupC->execute([0, vpCatKey($catName)]);
+            if ($dupC->fetch()) {
+                $toast = ['type' => 'error', 'msg' => "Category '$catName' already exists!"];
+            } else {
+                if ($catOrder <= 0) { $mx = $pdo->prepare("SELECT COALESCE(MAX(sort_order),0)+1 FROM product_categories WHERE subdomain_id = ?"); $mx->execute([0]); $catOrder = (int)$mx->fetchColumn(); }
+                $pdo->prepare("INSERT INTO product_categories (subdomain_id, name, sort_order, is_active) VALUES (?, ?, ?, 1)")->execute([0, $catName, $catOrder]);
+                $toast = ['type' => 'success', 'msg' => "Category '$catName' added (serial $catOrder)!"];
+            }
         }
     }
+    if ($act === 'update_product_category') {
+        $catId    = (int)($_POST['category_id'] ?? 0);
+        $newName  = strtoupper(preg_replace('/\s+/', ' ', trim((string)($_POST['category_name'] ?? ''))));
+        $catOrder = (int)($_POST['sort_order'] ?? 0);
+        $catOn    = isset($_POST['is_active']) ? 1 : 0;
+        $oldC = $pdo->prepare("SELECT name FROM product_categories WHERE id = ? AND subdomain_id = ?");
+        $oldC->execute([$catId, 0]);
+        $oldName = $oldC->fetchColumn();
+        if ($oldName !== false && $newName !== '') {
+            $pdo->prepare("UPDATE product_categories SET name = ?, sort_order = ?, is_active = ? WHERE id = ? AND subdomain_id = ?")->execute([$newName, $catOrder, $catOn, $catId, 0]);
+            if (vpCatKey((string)$oldName) !== vpCatKey($newName)) {
+                // নাম বদলালে ওই ক্যাটাগরির সব প্রোডাক্টও নতুন নামে চলে যাবে
+                $pdo->prepare("UPDATE products SET category = ? WHERE subdomain_id = ? AND REPLACE(REPLACE(REPLACE(UPPER(category),' ',''),'-',''),'_','') = ?")->execute([$newName, 0, vpCatKey((string)$oldName)]);
+            }
+            $toast = ['type' => 'success', 'msg' => "Category '$newName' updated!"];
+        }
+    }
+    if ($act === 'add_default_categories') {
+        $added = 0; $ord = 1;
+        foreach (['NONROOT', 'ROOT', 'IPHONE', 'PC'] as $dc) {
+            $dupC = $pdo->prepare("SELECT id FROM product_categories WHERE subdomain_id = ? AND REPLACE(REPLACE(REPLACE(UPPER(name),' ',''),'-',''),'_','') = ? LIMIT 1");
+            $dupC->execute([0, vpCatKey($dc)]);
+            if (!$dupC->fetch()) { $pdo->prepare("INSERT INTO product_categories (subdomain_id, name, sort_order, is_active) VALUES (?, ?, ?, 1)")->execute([0, $dc, $ord]); $added++; }
+            $ord++;
+        }
+        $toast = ['type' => 'success', 'msg' => "$added default categories added (NONROOT, ROOT, IPHONE, PC)"];
+    }
     if ($act === 'delete_product_category') {
-        $catId = (int)$_POST['category_id'];
-        $pdo->prepare("DELETE FROM product_categories WHERE id = ? AND subdomain_id = 0")->execute([$catId]);
+        $catId = (int)($_POST['category_id'] ?? 0);
+        $pdo->prepare("DELETE FROM product_categories WHERE id = ? AND subdomain_id = ?")->execute([$catId, 0]);
         $toast = ['type' => 'success', 'msg' => 'Category deleted!'];
     }
 
@@ -2234,6 +2294,7 @@ $pendingTrxCount = (int)($pdo->query("SELECT COUNT(*) FROM transactions WHERE st
 
 $usersList = $pdo->query("SELECT u.*, (SELECT COUNT(*) FROM licenses WHERE user_id = u.id AND subdomain_id = 0) AS total_sold_keys FROM users u WHERE u.subdomain_id = 0 ORDER BY u.id DESC")->fetchAll(PDO::FETCH_ASSOC);
 
+try { $stCatR = $pdo->prepare("SELECT * FROM product_categories WHERE subdomain_id = ? ORDER BY sort_order ASC, id ASC"); $stCatR->execute([0]); $productCategoriesList = $stCatR->fetchAll(PDO::FETCH_ASSOC); } catch (Throwable $e) {}
 $productsData = [];
 $allProductPlansFlat = [];
 try {
@@ -3473,7 +3534,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         </div>
                         <div>
                             <label class="text-slate-400 block mb-1 font-semibold">Category</label>
-                            <input type="text" name="category" value="APKMOD" class="w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-fuchsia-300 outline-none uppercase font-bold">
+                            <?= vpCategorySelect($productCategoriesList ?? [], 'category', '', '', 'w-full bg-slate-900 border border-slate-800 p-3 rounded-xl text-fuchsia-300 outline-none font-bold') ?>
                         </div>
                     </div>
 
@@ -4724,12 +4785,21 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                         </thead>
                         <tbody class="divide-y divide-slate-800/60">
                             <?php if (empty($productCategoriesList)): ?>
-                                <tr><td colspan="3" class="py-4 text-center text-slate-500 font-sans">No custom categories added yet. Default order (ALL -> NONROOT -> ROOT -> IPHONE -> PC -> OTHER) applies.</td></tr>
+                                <tr><td colspan="3" class="py-4 text-center text-slate-500 font-sans">No categories yet. <form method="POST" class="inline"><input type="hidden" name="admin_action" value="add_default_categories"><input type="hidden" name="active_tab" value="tab-settings"><button type="submit" class="ml-2 px-3 py-1 rounded-lg bg-purple-600 text-white text-[10px] font-black uppercase">+ Add NONROOT, ROOT, IPHONE, PC</button></form></td></tr>
                             <?php else: ?>
                                 <?php foreach ($productCategoriesList as $pc): ?>
                                     <tr>
-                                        <td class="text-amber-400 font-black">#<?= $pc['sort_order'] ?></td>
-                                        <td class="text-white font-bold"><?= htmlspecialchars($pc['name']) ?></td>
+                                        <td colspan="2">
+                                            <form method="POST" class="flex flex-wrap items-center gap-2">
+                                                <input type="hidden" name="admin_action" value="update_product_category">
+                                                <input type="hidden" name="active_tab" value="tab-settings">
+                                                <input type="hidden" name="category_id" value="<?= (int)$pc['id'] ?>">
+                                                <input type="number" name="sort_order" value="<?= (int)$pc['sort_order'] ?>" title="Serial" class="w-16 bg-slate-900 border border-slate-800 p-2 rounded-lg text-amber-300 font-black text-center outline-none">
+                                                <input type="text" name="category_name" value="<?= htmlspecialchars($pc['name']) ?>" class="flex-1 min-w-[120px] bg-slate-900 border border-slate-800 p-2 rounded-lg text-white font-bold uppercase outline-none">
+                                                <label class="flex items-center gap-1 text-[10px] font-bold <?= (int)($pc['is_active'] ?? 1) === 1 ? 'text-emerald-300' : 'text-slate-500' ?>"><input type="checkbox" name="is_active" value="1" <?= (int)($pc['is_active'] ?? 1) === 1 ? 'checked' : '' ?> class="rounded"> Show</label>
+                                                <button type="submit" class="px-3 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white text-[10px] font-black uppercase">Save</button>
+                                            </form>
+                                        </td>
                                         <td class="text-right">
                                             <form method="POST" class="inline" onsubmit="return confirm('Delete category?');">
                                                 <input type="hidden" name="admin_action" value="delete_product_category">
@@ -5534,7 +5604,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                     </div>
                     <div>
                         <label class="text-slate-400 block mb-1">Category</label>
-                        <input type="text" id="editModalCategory" name="category" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-fuchsia-300 outline-none uppercase font-bold">
+                        <?= vpCategorySelect($productCategoriesList ?? [], 'category', '', 'editModalCategory', 'w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-fuchsia-300 outline-none font-bold') ?>
                     </div>
                 </div>
 
@@ -6204,7 +6274,10 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
         function openProductEditor(prod) {
             document.getElementById('editModalProdId').value = prod.id;
             document.getElementById('editModalName').value = prod.name || '';
-            document.getElementById('editModalCategory').value = prod.category || 'APKMOD';
+            (function(){ const sel = document.getElementById('editModalCategory'); const key = v => String(v || '').toUpperCase().replace(/[\s_\-]+/g, '').replace('NOONROOT','NONROOT').replace(/^IOS$/,'IPHONE');
+                const want = key(prod.category); let found = false;
+                [...sel.options].forEach(o => { if (key(o.value) === want) { sel.value = o.value; found = true; } });
+                if (!found && prod.category) { const o = new Option(String(prod.category).toUpperCase() + ' (old)', String(prod.category).toUpperCase()); sel.add(o); sel.value = o.value; } })();
             document.getElementById('editModalSortOrder').value = prod.sort_order || 0;
             document.getElementById('editModalDownload').value = prod.download_link || '';
             document.getElementById('editModalSetup').value = prod.setup_link || '';

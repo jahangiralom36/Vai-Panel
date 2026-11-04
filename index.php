@@ -2584,6 +2584,16 @@ $catalogProducts = [];
 // ====================================================================
 $preferredCategoryOrder = ['ALL', 'NONROOT', 'ROOT', 'IPHONE', 'PC', 'OTHER'];
 $dynamicCategoriesFound = [];
+$categoryLabels = [];
+if (!function_exists('vpCatKey')) {
+    // "Non Root" / "NON-ROOT" / "non_root" → NONROOT (অ্যাডমিন প্যানেলের সাথে একই নিয়ম)
+    function vpCatKey(string $n): string {
+        $k = strtoupper(preg_replace('/[\s_\-]+/', '', trim($n)));
+        if ($k === 'NOONROOT') $k = 'NONROOT';
+        if ($k === 'IOS') $k = 'IPHONE';
+        return $k;
+    }
+}
 
 try {
     $stmtCatList = $pdo->prepare("SELECT name FROM product_categories 
@@ -2591,11 +2601,10 @@ try {
         ORDER BY sort_order ASC, id ASC");
     $stmtCatList->execute([$currentSubdomainId]);
     foreach ($stmtCatList->fetchAll(PDO::FETCH_COLUMN) as $catName) {
-        $catUpper = strtoupper(trim($catName));
-        if ($catUpper === 'NOONROOT') $catUpper = 'NONROOT';
-        if ($catUpper === 'I PHONE' || $catUpper === 'IOS') $catUpper = 'IPHONE';
+        $catUpper = vpCatKey((string)$catName);
         if (!empty($catUpper) && !in_array($catUpper, $dynamicCategoriesFound)) {
             $dynamicCategoriesFound[] = $catUpper;
+            $categoryLabels[$catUpper] = strtoupper(trim((string)$catName));
         }
     }
 } catch (Throwable $e) {}
@@ -2658,9 +2667,7 @@ try {
         $pName = trim($dp['product_name']);
         if (empty($pName)) continue;
 
-        $rawCat = !empty($dp['category']) ? strtoupper(trim($dp['category'])) : 'APKMOD';
-        if ($rawCat === 'NOONROOT') $rawCat = 'NONROOT';
-        if ($rawCat === 'I PHONE' || $rawCat === 'IOS') $rawCat = 'IPHONE';
+        $rawCat = !empty($dp['category']) ? vpCatKey((string)$dp['category']) : 'APKMOD';
 
         if (!in_array($rawCat, $discoveredFromProducts)) {
             $discoveredFromProducts[] = $rawCat;
@@ -2796,9 +2803,17 @@ try {
         }
     } catch (Throwable $e) {}
 
-    // BUILD ORDERED CATEGORY LIST: ALL -> NONROOT -> ROOT -> IPHONE -> PC -> OTHER -> (others)
+    // BUILD ORDERED CATEGORY LIST: অ্যাডমিন প্যানেলে ক্যাটাগরি থাকলে তার সিরিয়াল অনুযায়ী, নাহলে ডিফল্ট ক্রম
     $allDiscoveredCats = array_unique(array_merge($dynamicCategoriesFound, $discoveredFromProducts));
     $orderedCategories = [];
+    if (!empty($dynamicCategoriesFound)) $preferredCategoryOrder = array_merge(['ALL'], $dynamicCategoriesFound);
+    // অ্যাডমিন "Show" বন্ধ করা ক্যাটাগরির ট্যাব দেখাবে না (প্রোডাক্ট ALL এ থাকবে)
+    try {
+        $stOffCat = $pdo->prepare("SELECT name FROM product_categories WHERE subdomain_id = ? AND is_active = 0");
+        $stOffCat->execute([$currentSubdomainId]);
+        $offCats = array_map(function ($n) { return vpCatKey((string)$n); }, $stOffCat->fetchAll(PDO::FETCH_COLUMN));
+        if ($offCats) $allDiscoveredCats = array_values(array_diff($allDiscoveredCats, $offCats));
+    } catch (Throwable $e) {}
 
     foreach ($preferredCategoryOrder as $pCat) {
         if ($pCat === 'ALL') {
@@ -3891,8 +3906,8 @@ if ($isFirebaseEnabled) {
             <!-- 3. CATEGORY PILLS FILTER (EXACT SERIAL: ALL -> NONROOT -> ROOT -> IPHONE -> PC -> OTHER) -->
             <div class="flex items-center space-x-1.5 overflow-x-auto pb-0.5 no-scrollbar text-xs font-mono font-bold">
                 <?php foreach ($availableCategories as $idx => $cat): ?>
-                    <button type="button" onclick="filterByCategory('<?= $cat ?>', this)" class="category-pill <?= $idx === 0 ? 'active' : '' ?> px-3.5 py-1.5 rounded-xl flex items-center space-x-1 flex-shrink-0 text-[11px]">
-                        <span><?= $cat ?></span>
+                    <button type="button" onclick="filterByCategory(<?= htmlspecialchars(json_encode((string)$cat), ENT_QUOTES) ?>, this)" class="category-pill <?= $idx === 0 ? 'active' : '' ?> px-3.5 py-1.5 rounded-xl flex items-center space-x-1 flex-shrink-0 text-[11px]">
+                        <span><?= htmlspecialchars($categoryLabels[$cat] ?? $cat) ?></span>
                     </button>
                 <?php endforeach; ?>
             </div>
@@ -3919,7 +3934,7 @@ if ($isFirebaseEnabled) {
                         $hasDiscount    = (int)($prod['max_discount'] ?? 0) > 0;
                     ?>
                         <div class="product-card <?= $isProdMaint ? 'product-card-maint' : '' ?> p-3 sm:p-3.5 cursor-pointer prod-item-box space-y-2.5"
-                             data-category="<?= $prod['category'] ?>"
+                             data-category="<?= htmlspecialchars($prod['category']) ?>"
                              <?php if ($isProdMaint): ?>
                              data-maint-name="<?= htmlspecialchars($prod['name']) ?>"
                              data-maint-msg="<?= htmlspecialchars($prod['maintenance_msg'] ?? '') ?>"
