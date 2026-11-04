@@ -250,6 +250,22 @@ if (empty($tenantTelegram) && !empty($settings['support_telegram'])) {
 if (empty($tenantWhatsapp) && !empty($settings['support_whatsapp'])) {
     $tenantWhatsapp = trim($settings['support_whatsapp']);
 }
+// 💬 মেইন ডোমেইন (Vai Panel): mother admin-এর Social Channel লিংকও সাপোর্ট হিসেবে ধরবে
+if (!$tenant) {
+    if (empty($tenantTelegram) && !empty($settings['footer_telegram_link'])) $tenantTelegram = trim($settings['footer_telegram_link']);
+    if (empty($tenantTelegram) && !empty($defaultSupportLink)) $tenantTelegram = trim($defaultSupportLink);
+    if (empty($tenantWhatsapp) && !empty($settings['footer_whatsapp_link'])) $tenantWhatsapp = trim($settings['footer_whatsapp_link']);
+}
+// টেলিগ্রাম @username → পূর্ণ লিংক; হোয়াটসঅ্যাপ নাম্বার/লিংক → ক্লিকযোগ্য লিংক
+if ($tenantTelegram !== '' && !preg_match('~^(https?://|tg://)~i', $tenantTelegram)) {
+    $tenantTelegram = 'https://t.me/' . ltrim(preg_replace('~^(t\.me/|telegram\.me/)~i', '', $tenantTelegram), '@');
+}
+$tenantWhatsappHref = '';
+if ($tenantWhatsapp !== '') {
+    if (preg_match('~^https?://~i', $tenantWhatsapp)) $tenantWhatsappHref = $tenantWhatsapp;
+    elseif (preg_match('~^(wa\.me|chat\.whatsapp\.com|api\.whatsapp\.com)~i', $tenantWhatsapp)) $tenantWhatsappHref = 'https://' . $tenantWhatsapp;
+    else { $waDigits = preg_replace('/[^0-9]/', '', $tenantWhatsapp); $tenantWhatsappHref = $waDigits !== '' ? 'https://wa.me/' . $waDigits : ''; }
+}
 
 // সাইট কালার: সাব-ডোমেইনের থিম কালার অথবা মাদার সেটিংস কালার
 $siteThemeColor = !empty($tenant['theme_color']) ? $tenant['theme_color'] : ($settings['main_site_theme_color'] ?? '#00f5ff');
@@ -506,6 +522,10 @@ if (!function_exists('vpCallResetApi')) {
             return ['ok' => $ok, 'message' => $msg !== '' ? $msg : ($ok ? 'Reset successful' : 'Reset failed. Please check your key and try again.')];
         }
         // JSON নয় — সাধারণ টেক্সট উত্তর
+        if (stripos($body, '<html') !== false || stripos($body, '<!doctype') !== false || $code >= 400) {
+            // HTML/এরর পেজ (404, 500, Cloudflare ইত্যাদি) — কাঁচা HTML না দেখিয়ে পরিষ্কার মেসেজ
+            return ['ok' => false, 'message' => 'Reset server error' . ($code > 0 ? ' (HTTP ' . $code . ')' : '') . '. Please try again later or contact support.'];
+        }
         $plain = mb_substr(trim(strip_tags($body)), 0, 200);
         $ok = $code < 400 && preg_match('/success|reset/i', $plain) && !preg_match('/fail|error|invalid|not found|expired|denied/i', $plain);
         return ['ok' => (bool)$ok, 'message' => $ok ? 'Reset successful' : ($plain !== '' ? $plain : 'Reset failed. Please try again.')];
@@ -2118,8 +2138,9 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
         exit;
     }
 
-    $rawKey = trim($_POST['license_key'] ?? '');
-    if (empty($rawKey)) {
+    // কপি-পেস্টে আসা স্পেস/নিউলাইন/অদৃশ্য ক্যারেক্টার বাদ
+    $rawKey = trim(preg_replace('/[\s\x{200B}-\x{200D}\x{FEFF}]+/u', '', (string)($_POST['license_key'] ?? '')));
+    if ($rawKey === '' || strlen($rawKey) > 200) {
         echo json_encode(['status' => 'error', 'message' => 'Please enter a valid license key!']);
         exit;
     }
@@ -2179,6 +2200,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'reset_key') {
         $res = vpCallResetApi($endpoint . '?' . http_build_query(['action' => 'reset_key', 'key' => $rawKey, 'license_key' => $rawKey, 'api_key' => $kmKey]));
     } else {
         $cfg = vpResetApiConfig($pdo, $currentSubdomainId);
+        // Reset API Key আলাদা না দিলে এই স্টোরের Connect Key Manager-এর API Key দিয়েই রিসেট হবে
+        if ($cfg['api_key'] === '') $cfg['api_key'] = trim((string)($settings['km_api_key'] ?? ''));
         if ($cfg['api_key'] === '') {
             echo json_encode(['status' => 'error', 'message' => 'Reset API key is not configured yet. Please contact support.']);
             exit;
@@ -4097,8 +4120,8 @@ if ($isFirebaseEnabled) {
                     </div>
 
                     <?php if (true): ?>
-                        <div id="moreWrapTopBuyers" class="flex justify-end pt-1 <?= count($topBuyers) > 3 ? '' : 'hidden' ?>">
-                            <button type="button" id="moreBtnTopBuyers" onclick="toggleMoreHistory('top_buyers')" class="px-3 py-1 rounded-xl bg-[#090317] border border-cyan-500/40 text-cyan-300 hover:text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-sm">
+                        <div id="moreWrapTopBuyers" class="flex justify-center pt-1.5 <?= count($topBuyers) > 3 ? '' : 'hidden' ?>">
+                            <button type="button" id="moreBtnTopBuyers" onclick="toggleMoreHistory('top_buyers')" class="vp-more-btn px-4 py-1.5 rounded-full bg-gradient-to-r from-[#0b1230] to-[#160a2e] border border-cyan-500/40 text-cyan-300 hover:text-white hover:border-cyan-300 text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-[0_0_12px_rgba(0,245,255,0.15)]">
                                 <span>More</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>
                             </button>
                         </div>
@@ -4152,8 +4175,8 @@ if ($isFirebaseEnabled) {
                     </div>
 
                     <?php if (true): ?>
-                        <div id="moreWrapRecentOrders" class="flex justify-end pt-1 <?= count($recentOrdersList) > 3 ? '' : 'hidden' ?>">
-                            <button type="button" id="moreBtnRecentOrders" onclick="toggleMoreHistory('recent_orders')" class="px-3 py-1 rounded-xl bg-[#090317] border border-cyan-500/40 text-cyan-300 hover:text-white text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-sm">
+                        <div id="moreWrapRecentOrders" class="flex justify-center pt-1.5 <?= count($recentOrdersList) > 3 ? '' : 'hidden' ?>">
+                            <button type="button" id="moreBtnRecentOrders" onclick="toggleMoreHistory('recent_orders')" class="vp-more-btn px-4 py-1.5 rounded-full bg-gradient-to-r from-[#0b1230] to-[#160a2e] border border-cyan-500/40 text-cyan-300 hover:text-white hover:border-cyan-300 text-[10px] font-black uppercase tracking-wider flex items-center gap-1.5 transition active:scale-95 shadow-[0_0_12px_rgba(0,245,255,0.15)]">
                                 <span>More</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>
                             </button>
                         </div>
@@ -4421,6 +4444,21 @@ if ($isFirebaseEnabled) {
                         <?php endif; ?>
                     </div>
                 </div>
+
+                <?php if (!empty($tenantTelegram) || !empty($tenantWhatsappHref)): ?>
+                <!-- 💬 Store Support (প্রতিটি স্টোরের নিজের লিংক) -->
+                <div class="glass-card p-3 rounded-2xl border border-cyan-500/20 space-y-2">
+                    <div class="text-[10px] font-black uppercase tracking-wider text-cyan-300 flex items-center gap-1.5"><i class="fa-solid fa-headset"></i> Need Help? Contact Support</div>
+                    <div class="grid <?= (!empty($tenantTelegram) && !empty($tenantWhatsappHref)) ? 'grid-cols-2' : 'grid-cols-1' ?> gap-2">
+                        <?php if (!empty($tenantTelegram)): ?>
+                            <a href="<?= htmlspecialchars($tenantTelegram) ?>" target="_blank" rel="noopener" class="py-2.5 rounded-xl bg-gradient-to-r from-sky-500 to-blue-600 text-white text-[11px] font-black uppercase flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition"><i class="fa-brands fa-telegram text-sm"></i> Telegram</a>
+                        <?php endif; ?>
+                        <?php if (!empty($tenantWhatsappHref)): ?>
+                            <a href="<?= htmlspecialchars($tenantWhatsappHref) ?>" target="_blank" rel="noopener" class="py-2.5 rounded-xl bg-gradient-to-r from-green-500 to-emerald-600 text-white text-[11px] font-black uppercase flex items-center justify-center gap-1.5 shadow-md active:scale-95 transition"><i class="fa-brands fa-whatsapp text-sm"></i> WhatsApp</a>
+                        <?php endif; ?>
+                    </div>
+                </div>
+                <?php endif; ?>
 
                 <div class="pt-1 text-center">
                     <a href="index.php?logout=1" class="inline-flex items-center space-x-1.5 px-5 py-2.5 rounded-xl bg-red-950/40 border border-red-500/30 text-red-400 text-xs font-bold hover:bg-red-900/40 transition font-mono active:scale-95 shadow-md">
@@ -5393,12 +5431,12 @@ if ($isFirebaseEnabled) {
                     <i class="fa-brands fa-telegram text-sm"></i> Telegram Support
                 </a>
             <?php endif; ?>
-            <?php if (!empty($tenantWhatsapp)): ?>
-                <a href="https://wa.me/<?= htmlspecialchars(preg_replace('/[^0-9]/', '', $tenantWhatsapp)) ?>" target="_blank" class="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-500 to-green-600 text-white font-black uppercase tracking-wider flex items-center justify-center gap-1.5 text-[11px] font-sans shadow-md">
+            <?php if (!empty($tenantWhatsappHref)): ?>
+                <a href="<?= htmlspecialchars($tenantWhatsappHref) ?>" target="_blank" class="w-full py-2.5 rounded-xl bg-gradient-to-r from-green-500 to-green-600 text-white font-black uppercase tracking-wider flex items-center justify-center gap-1.5 text-[11px] font-sans shadow-md">
                     <i class="fa-brands fa-whatsapp text-sm"></i> WhatsApp Support
                 </a>
             <?php endif; ?>
-            <?php if (empty($tenantTelegram) && empty($tenantWhatsapp)): ?>
+            <?php if (empty($tenantTelegram) && empty($tenantWhatsappHref)): ?>
                 <p class="text-[10px] text-gray-500 italic">Support contact not configured yet.</p>
             <?php endif; ?>
         </div>
@@ -5525,14 +5563,21 @@ if ($isFirebaseEnabled) {
             const box = document.getElementById(cfg.list); if (!box) return;
             const rows = Array.from(box.children).filter(el => el.classList.contains('b-member-card'));
             const shown = Math.min(rows.length, Math.max(VP_HIST_LIMIT, vpHistShown[type] || VP_HIST_LIMIT));
-            rows.forEach((row, i) => row.classList.toggle('hidden', i >= shown));
+            rows.forEach((row, i) => {
+                const wasHidden = row.classList.contains('hidden');
+                row.classList.toggle('hidden', i >= shown);
+                // নতুন খোলা সারিগুলো একে একে স্মুথভাবে আসবে
+                if (wasHidden && i < shown && row.animate) {
+                    try { row.animate([{ opacity: 0, transform: 'translateY(6px)' }, { opacity: 1, transform: 'none' }], { duration: 260, delay: Math.max(0, i - (shown - VP_HIST_STEP)) * 45, easing: 'ease-out', fill: 'backwards' }); } catch (_) {}
+                }
+            });
             const remaining = rows.length - shown;
             const wrap = document.getElementById(cfg.wrap);
             if (wrap) wrap.classList.toggle('hidden', rows.length <= VP_HIST_LIMIT);
             const btn = document.getElementById(cfg.btn);
             if (btn) btn.innerHTML = remaining > 0
-                ? `<span>More (+${Math.min(VP_HIST_STEP, remaining)})</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`
-                : `<span>Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>`;
+                ? `<span>Show ${Math.min(VP_HIST_STEP, remaining)} More</span> <span class="text-[9px] text-cyan-500/70 normal-case">(${shown}/${rows.length})</span> <i class="fa-solid fa-chevron-down text-[9px]"></i>`
+                : `<span>Show Less</span> <i class="fa-solid fa-chevron-up text-[9px]"></i>`;
             if (type === 'top_buyers') isTopBuyersExpanded = shown > VP_HIST_LIMIT; else isRecentOrdersExpanded = shown > VP_HIST_LIMIT;
         }
         function toggleMoreHistory(type) {
@@ -6764,8 +6809,14 @@ document.addEventListener('DOMContentLoaded', function() {
             formData.append('reset_product', product);
             formData.append('license_key', targetKey);
             try {
-                const res = await fetch('index.php', { method: 'POST', body: formData });
-                const data = await res.json();
+                const res = await fetch('index.php', { method: 'POST', body: formData, credentials: 'same-origin' });
+                const raw = await res.text();
+                let data = null;
+                try { data = JSON.parse(raw); } catch (_) {
+                    const m = raw.match(/\{[\s\S]*"status"[\s\S]*\}/);
+                    if (m) { try { data = JSON.parse(m[0]); } catch (__) {} }
+                }
+                if (!data) data = { status: 'error', message: 'Server returned an unexpected response. Please try again.' };
                 show(data.status === 'success', data.message || 'Reset failed!');
                 showToast(data.message || 'Reset failed!', data.status === 'success' ? 'success' : 'error');
             } catch (err) {

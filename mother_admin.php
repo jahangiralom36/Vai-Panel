@@ -367,6 +367,9 @@ if (!function_exists('vpCallResetApi')) {
             return ['ok' => $ok, 'message' => $msg !== '' ? $msg : ($ok ? 'Reset successful' : 'Reset failed. Please check your key and try again.')];
         }
         // JSON নয় — সাধারণ টেক্সট উত্তর
+        if (stripos($body, '<html') !== false || stripos($body, '<!doctype') !== false || $code >= 400) {
+            return ['ok' => false, 'message' => 'Reset server error' . ($code > 0 ? ' (HTTP ' . $code . ')' : '') . '. Please try again later or contact support.'];
+        }
         $plain = mb_substr(trim(strip_tags($body)), 0, 200);
         $ok = $code < 400 && preg_match('/success|reset/i', $plain) && !preg_match('/fail|error|invalid|not found|expired|denied/i', $plain);
         return ['ok' => (bool)$ok, 'message' => $ok ? 'Reset successful' : ($plain !== '' ? $plain : 'Reset failed. Please try again.')];
@@ -1097,6 +1100,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
 
     if ($act === 'test_reset_api') {
         $cfg = vpResetApiConfig($pdo);
+        if ($cfg['api_key'] === '') $cfg['api_key'] = trim((string)($settings['km_api_key'] ?? '')); // Connect Key Manager key fallback
         $firstId = 0;
         foreach (vpGetResetProducts($pdo, true) as $__p) { if ((int)$__p['api_id'] > 0) { $firstId = (int)$__p['api_id']; break; } }
         if ($cfg['api_key'] === '') {
@@ -1730,8 +1734,13 @@ if (!function_exists('vpNormalizeTgLink')) {
         $ytSocialLink  = trim($_POST['footer_youtube_link'] ?? '');
 
         $maintTgLink   = trim($_POST['maintenance_telegram_link'] ?? '');
+        // 💬 মেইন স্টোরের (Vai Panel) সাপোর্ট টেলিগ্রাম/হোয়াটসঅ্যাপ
+        $supTgMain     = trim($_POST['support_telegram'] ?? ($settings['support_telegram'] ?? ''));
+        $supWaMain     = trim($_POST['support_whatsapp'] ?? ($settings['support_whatsapp'] ?? ''));
 
         $saveArray = [
+            'support_telegram'             => $supTgMain,
+            'support_whatsapp'             => $supWaMain,
             'site_name'                    => $newSiteName,
             'app_download_url'             => $appDownloadUrl,
             'site_logo'                    => $siteLogoPath,
@@ -4613,6 +4622,22 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
                             <?php endif; ?>
                             <input type="file" name="loading_logo_file" accept="image/*" class="w-full text-slate-400 file:mr-2 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:bg-fuchsia-500 file:text-white">
                         </div>
+                    </div>
+
+                    <!-- 💬 Main Store (Vai Panel) Support — শুধু মেইন ডোমেইনের জন্য -->
+                    <div class="bg-slate-900/80 p-4 rounded-2xl border border-cyan-500/30 space-y-3">
+                        <strong class="text-cyan-300 text-xs block font-bold uppercase"><i class="fa-solid fa-headset mr-1"></i> Store Support (Telegram &amp; WhatsApp)</strong>
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                            <div>
+                                <label class="text-cyan-400 block mb-1 font-bold text-[11px]">Support Telegram Link / @username</label>
+                                <input type="text" name="support_telegram" value="<?= htmlspecialchars($settings['support_telegram'] ?? '') ?>" placeholder="https://t.me/your_username" class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none focus:border-cyan-400">
+                            </div>
+                            <div>
+                                <label class="text-emerald-400 block mb-1 font-bold text-[11px]">Support WhatsApp Number / Link</label>
+                                <input type="text" name="support_whatsapp" value="<?= htmlspecialchars($settings['support_whatsapp'] ?? '') ?>" placeholder="+8801700000000 or https://wa.me/..." class="w-full bg-[#030612] border border-slate-800 p-2.5 rounded-xl text-white outline-none focus:border-emerald-400">
+                            </div>
+                        </div>
+                        <span class="text-[9px] text-slate-400 block">Main domain (Vai Panel) কাস্টমারদের Support বাটনে এই লিংক দেখাবে। খালি রাখলে নিচের Social Channel লিংক ব্যবহার হবে। সাব-ডোমেইন নিজের Sub Admin থেকে আলাদা সেট করবে।</span>
                     </div>
 
                     <div class="bg-slate-900/80 p-4 rounded-2xl border border-slate-800 space-y-3">

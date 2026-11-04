@@ -630,6 +630,9 @@ if (!function_exists('vpCallResetApi')) {
             return ['ok' => $ok, 'message' => $msg !== '' ? $msg : ($ok ? 'Reset successful' : 'Reset failed. Please check your key and try again.')];
         }
         // JSON নয় — সাধারণ টেক্সট উত্তর
+        if (stripos($body, '<html') !== false || stripos($body, '<!doctype') !== false || $code >= 400) {
+            return ['ok' => false, 'message' => 'Reset server error' . ($code > 0 ? ' (HTTP ' . $code . ')' : '') . '. Please try again later or contact support.'];
+        }
         $plain = mb_substr(trim(strip_tags($body)), 0, 200);
         $ok = $code < 400 && preg_match('/success|reset/i', $plain) && !preg_match('/fail|error|invalid|not found|expired|denied/i', $plain);
         return ['ok' => (bool)$ok, 'message' => $ok ? 'Reset successful' : ($plain !== '' ? $plain : 'Reset failed. Please try again.')];
@@ -1328,6 +1331,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
 
     if ($act === 'test_reset_api') {
         $cfg = vpResetApiConfig($pdo, $subadminTenantId);
+        if ($cfg['api_key'] === '') $cfg['api_key'] = trim((string)($settings['km_api_key'] ?? '')); // Connect Key Manager key fallback
         $firstId = 0;
         foreach (vpGetResetProducts($pdo, true, $subadminTenantId) as $__p) { if ((int)$__p['api_id'] > 0) { $firstId = (int)$__p['api_id']; break; } }
         if ($cfg['api_key'] === '') {
