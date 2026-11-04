@@ -929,7 +929,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                     $userPrice     = round($basePrice * 1.25, 2);
 
                     if (!$planExists) {
-                        $stmtPlanIns = $pdo->prepare("INSERT INTO product_plans (subdomain_id, product_id, duration_days, plan_title, reseller_price, user_price, regular_price, discount_percent, reseller_discount_percent, api_plan_id, reward_coins, coin_price) VALUES (0, ?, 30, ?, ?, ?, ?, 0.00, 20.00, ?, 0, 0)");
+                        $stmtPlanIns = $pdo->prepare("INSERT INTO product_plans (subdomain_id, product_id, duration_days, plan_title, reseller_price, user_price, regular_price, discount_percent, reseller_discount_percent, api_plan_id, reward_coins, coin_price) VALUES (0, ?, 30, ?, ?, ?, ?, 0.00, 0.00, ?, 0, 0)");
                         $stmtPlanIns->execute([$prodId, $planTitle, $resellerPrice, $userPrice, $userPrice, $extId]);
                     } else {
                         $stmtPlanUp = $pdo->prepare("UPDATE product_plans SET product_id = ?, plan_title = ?, reseller_price = ?, user_price = ?, regular_price = ? WHERE api_plan_id = ? AND subdomain_id = 0");
@@ -997,7 +997,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                         $userPrice     = round($basePrice * 1.25, 2);
 
                         if (!$planExists) {
-                            $stmtPlanIns = $pdo->prepare("INSERT INTO product_plans (subdomain_id, product_id, duration_days, plan_title, reseller_price, user_price, regular_price, discount_percent, reseller_discount_percent, api_plan_id, reward_coins, coin_price) VALUES (0, ?, 30, ?, ?, ?, ?, 0.00, 20.00, ?, 0, 0)");
+                            $stmtPlanIns = $pdo->prepare("INSERT INTO product_plans (subdomain_id, product_id, duration_days, plan_title, reseller_price, user_price, regular_price, discount_percent, reseller_discount_percent, api_plan_id, reward_coins, coin_price) VALUES (0, ?, 30, ?, ?, ?, ?, 0.00, 0.00, ?, 0, 0)");
                             $stmtPlanIns->execute([$prodId, $planTitle, $resellerPrice, $userPrice, $userPrice, $extId]);
                         } else {
                             $stmtPlanUp = $pdo->prepare("UPDATE product_plans SET product_id = ?, plan_title = ?, reseller_price = ?, user_price = ?, regular_price = ? WHERE api_plan_id = ? AND subdomain_id = 0");
@@ -1241,6 +1241,8 @@ if (!function_exists('vpNormalizeTgLink')) {
                 $newPrice = ($discPercent > 0) ? max(0.01, round($regular * (1 - ($discPercent / 100)), 2)) : $regular;
                 $stmtUp->execute([$newPrice, $discPercent, (int)$pl['id']]);
             }
+            // রিসেলারদের ডিসকাউন্টও একই % (আগে KeyManager সিঙ্কের ২০% আর কমানো যেত না)
+            $pdo->prepare("UPDATE product_plans SET reseller_discount_percent = ? WHERE subdomain_id = 0")->execute([$discPercent]);
 
             syncStackedPricesForAllUsers($pdo);
             $toast = ['type' => 'success', 'msg' => ($discPercent > 0) ? "Applied $discPercent% discount to all main domain product plans!" : "All product discounts reset to 0%!"];
@@ -1252,6 +1254,8 @@ if (!function_exists('vpNormalizeTgLink')) {
     if ($act === 'reset_all_product_discounts') {
         try {
             $pdo->exec("UPDATE product_plans SET user_price = regular_price, discount_percent = 0.00 WHERE regular_price > 0 AND subdomain_id = 0");
+            // সব ডিসকাউন্ট বন্ধ: কাস্টমার + রিসেলার (পুরনো ২০% সহ)
+            $pdo->exec("UPDATE product_plans SET discount_percent = 0.00, reseller_discount_percent = 0.00 WHERE subdomain_id = 0");
             syncStackedPricesForAllUsers($pdo);
             $toast = ['type' => 'success', 'msg' => "All product discounts turned off & regular prices restored!"];
         } catch (Throwable $e) {
@@ -1275,7 +1279,7 @@ if (!function_exists('vpNormalizeTgLink')) {
 
                 // ০% ডিসকাউন্ট দিলে সরাসরি আসল রেগুলার প্রাইস রিস্টোর করবে
                 $newPrice = ($discPercent > 0) ? max(0.01, round($regular * (1 - ($discPercent / 100)), 2)) : $regular;
-                $pdo->prepare("UPDATE product_plans SET user_price = ?, discount_percent = ? WHERE id = ? AND subdomain_id = 0")->execute([$newPrice, $discPercent, $planId]);
+                $pdo->prepare("UPDATE product_plans SET user_price = ?, discount_percent = ?, reseller_discount_percent = ? WHERE id = ? AND subdomain_id = 0")->execute([$newPrice, $discPercent, $discPercent, $planId]);
                 syncStackedPricesForAllUsers($pdo);
                 $toast = ['type' => 'success', 'msg' => ($discPercent > 0 ? "Plan discount updated to $discPercent%!" : "Discount reset to 0%! Regular price ($$regular USD) restored.")];
             }

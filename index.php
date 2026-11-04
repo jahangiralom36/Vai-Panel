@@ -1314,7 +1314,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
 
     $stmt = $pdo->prepare("SELECT p.id as real_product_id, p.name as product_name, p.is_active, 
                                   COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as plan_title,
-                                  pl.reseller_price, pl.user_price, pl.price,
+                                  pl.reseller_price, pl.user_price, pl.price, pl.regular_price,
                                   pl.reseller_discount_percent, COALESCE(pl.discount_percent, 0) as discount_percent,
                                   pl.api_plan_id, pl.reward_coins, pl.coin_price 
                            FROM product_plans pl 
@@ -1341,6 +1341,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
     $totalRewardCoins   = $rewardCoinsPerItem * $quantity;
 
     $rawRetailPrice = (float)(($plan['user_price'] ?? 0) ?: (($plan['price'] ?? 0) ?: ($plan['reseller_price'] ?? 0)));
+    // 🛡️ ডিসকাউন্ট হাব দাম কমিয়ে রাখলে % আবার কমবে না — আসল (regular) দাম থেকে একবারই %
+    if ((float)($plan['discount_percent'] ?? 0) > 0 && (float)($plan['regular_price'] ?? 0) > $rawRetailPrice) $rawRetailPrice = (float)$plan['regular_price'];
     $rawResellPrice = (float)(($plan['reseller_price'] ?? 0) ?: (($plan['price'] ?? 0) ?: ($plan['user_price'] ?? 0)));
     $basePrice = ($userRole === 'reseller') ? ($rawResellPrice > 0 ? $rawResellPrice : $rawRetailPrice) : ($rawRetailPrice > 0 ? $rawRetailPrice : $rawResellPrice);
 
@@ -1799,7 +1801,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
 
     $stmt = $pdo->prepare("SELECT p.id as real_product_id, p.name as product_name, p.is_active, 
                                   COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as plan_title,
-                                  pl.reseller_price, pl.user_price, pl.price,
+                                  pl.reseller_price, pl.user_price, pl.price, pl.regular_price,
                                   pl.reseller_discount_percent, COALESCE(pl.discount_percent, 0) as discount_percent,
                                   pl.api_plan_id, pl.reward_coins, pl.coin_price 
                            FROM product_plans pl 
@@ -1827,6 +1829,8 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
     $totalRewardCoins   = $rewardCoinsPerItem * $quantity;
 
     $rawRetailPrice = (float)(($plan['user_price'] ?? 0) ?: (($plan['price'] ?? 0) ?: ($plan['reseller_price'] ?? 0)));
+    // 🛡️ ডিসকাউন্ট হাব দাম কমিয়ে রাখলে % আবার কমবে না — আসল (regular) দাম থেকে একবারই %
+    if ((float)($plan['discount_percent'] ?? 0) > 0 && (float)($plan['regular_price'] ?? 0) > $rawRetailPrice) $rawRetailPrice = (float)$plan['regular_price'];
     $rawResellPrice = (float)(($plan['reseller_price'] ?? 0) ?: (($plan['price'] ?? 0) ?: ($plan['user_price'] ?? 0)));
     $basePrice = ($userRole === 'reseller') ? ($rawResellPrice > 0 ? $rawResellPrice : $rawRetailPrice) : ($rawRetailPrice > 0 ? $rawRetailPrice : $rawResellPrice);
 
@@ -2606,7 +2610,7 @@ try {
                        p.app_download_url,
                        pl.id as plan_id, 
                        COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as validity, 
-                       pl.reseller_price, pl.user_price, pl.price, pl.reseller_discount_percent, 
+                       pl.reseller_price, pl.user_price, pl.price, pl.regular_price, pl.reseller_discount_percent, 
                        COALESCE(pl.discount_percent, 0) as discount_percent, pl.api_plan_id,
                        pl.reward_coins, pl.coin_price 
                 FROM products p
@@ -2625,7 +2629,7 @@ try {
                        p.app_download_url,
                        pl.id as plan_id, 
                        COALESCE(NULLIF(pl.plan_title, ''), NULLIF(pl.validity, ''), 'Standard Plan') as validity, 
-                       pl.reseller_price, pl.user_price, pl.price, pl.reseller_discount_percent, 
+                       pl.reseller_price, pl.user_price, pl.price, pl.regular_price, pl.reseller_discount_percent, 
                        COALESCE(pl.discount_percent, 0) as discount_percent, pl.api_plan_id,
                        pl.reward_coins, pl.coin_price 
                 FROM products p
@@ -2673,6 +2677,8 @@ try {
         $prodAppUrl       = !empty($dp['app_download_url']) ? $dp['app_download_url'] : (!empty($dp['download_link']) ? $dp['download_link'] : '');
 
         $rawRetailUSD = (float)(($dp['user_price'] ?? 0) ?: (($dp['price'] ?? 0) ?: ($dp['reseller_price'] ?? 0)));
+        // 🛡️ ডাবল ডিসকাউন্ট বন্ধ: হাব দাম কমিয়ে রাখলে আসল দাম থেকে একবারই %
+        if ((float)($dp['discount_percent'] ?? 0) > 0 && (float)($dp['regular_price'] ?? 0) > $rawRetailUSD) $rawRetailUSD = (float)$dp['regular_price'];
         $rawResellUSD = (float)(($dp['reseller_price'] ?? 0) ?: (($dp['price'] ?? 0) ?: ($dp['user_price'] ?? 0)));
 
         $regularBaseUSD = ($userRole === 'reseller')
