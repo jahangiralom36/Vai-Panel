@@ -2684,6 +2684,8 @@ try {
 
         $rawCat = !empty($dp['category']) ? vpCatKey((string)$dp['category']) : 'APKMOD';
 
+        // ট্যাবে আসল নাম দেখাবে (যেমন "GILD GLORY BOOT"), শুধু ফিল্টারের জন্য কী ব্যবহার হবে
+        if (!isset($categoryLabels[$rawCat]) && !empty($dp['category'])) $categoryLabels[$rawCat] = strtoupper(trim(preg_replace('/\s+/', ' ', (string)$dp['category'])));
         if (!in_array($rawCat, $discoveredFromProducts)) {
             $discoveredFromProducts[] = $rawCat;
         }
@@ -3208,6 +3210,36 @@ if ($isFirebaseEnabled) {
         }
 
         .category-pill { background: #0a0414; border: 1px solid #1c0d30; color: #c4b5fd; transition: all 0.2s ease; }
+        /* 🛠️ display:flex যেন hidden কে ওভাররাইড না করে — ক্যাটাগরি ফিল্টার কাজ না করার আসল কারণ */
+        .product-card.hidden, .prod-item-box.hidden { display: none !important; }
+        /* 🗂️ ক্যাটাগরি ফিল্টার বার: এক লাইনে ৪টা (মোবাইল) / ৫টা (ডেস্কটপ), বাকিগুলো More চাপলে */
+        .vp-cat-bar { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+        @media (min-width: 640px) { .vp-cat-bar { grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 10px; } }
+        .vp-cat-btn {
+            min-height: 42px; padding: 8px 10px; border-radius: 14px; font-size: 12.5px; font-weight: 800; letter-spacing: .03em;
+            display: flex; align-items: center; justify-content: center; gap: 6px; text-align: center; line-height: 1.15;
+            white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            background: linear-gradient(180deg, #120728, #090316); border: 1px solid #2a1546; color: #d8c8ff;
+            box-shadow: inset 0 1px 0 rgba(255,255,255,.04); transition: transform .15s ease, border-color .2s ease, background .2s ease, box-shadow .2s ease;
+            -webkit-tap-highlight-color: transparent;
+        }
+        @media (min-width: 640px) { .vp-cat-btn { min-height: 46px; font-size: 13.5px; } }
+        .vp-cat-btn { white-space: normal; padding: 6px 6px; }
+        .vp-cat-btn > span { overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; word-break: break-word; }
+        @media (max-width: 639px) { .vp-cat-btn { font-size: 11.5px; letter-spacing: .01em; } }
+        .vp-cat-more, .vp-cat-more > span { white-space: nowrap; display: flex; align-items: center; gap: 4px; -webkit-line-clamp: unset; }
+        .vp-cat-count { flex-shrink: 0; }
+        .vp-cat-btn:hover { border-color: rgba(0,245,255,.55); color: #fff; }
+        .vp-cat-btn:active { transform: scale(.96); }
+        .vp-cat-btn.active { background: linear-gradient(90deg, #d946ef 0%, #a855f7 100%); color: #fff; border-color: #e879f9; box-shadow: 0 4px 16px rgba(217,70,239,.45); }
+        .vp-cat-btn.vp-cat-extra { display: none; }
+        .vp-cat-bar.expanded .vp-cat-btn.vp-cat-extra { display: flex; animation: vpCatIn .25s ease-out backwards; }
+        .vp-cat-more { background: linear-gradient(180deg, #071a24, #04111a); border-color: rgba(0,245,255,.35); color: #67e8f9; }
+        .vp-cat-more.has-active { border-color: #e879f9; color: #f5d0fe; box-shadow: 0 0 0 1px rgba(232,121,249,.35) inset; }
+        .vp-cat-more i { transition: transform .25s ease; font-size: 11px; }
+        .vp-cat-bar.expanded .vp-cat-more i { transform: rotate(180deg); }
+        .vp-cat-count { font-size: 10px; padding: 1px 6px; border-radius: 99px; background: rgba(0,245,255,.15); color: #a5f3fc; }
+        @keyframes vpCatIn { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
         .category-pill.active {
             background: linear-gradient(90deg, #d946ef 0%, #a855f7 100%); color: #ffffff;
             border-color: #d946ef; box-shadow: 0 2px 10px rgba(217, 70, 239, 0.35); font-weight: 800;
@@ -3941,14 +3973,20 @@ if ($isFirebaseEnabled) {
             </div>
             <?php endif; ?>
 
-            <!-- 3. CATEGORY PILLS FILTER (EXACT SERIAL: ALL -> NONROOT -> ROOT -> IPHONE -> PC -> OTHER) -->
-            <div class="flex items-center space-x-1.5 overflow-x-auto pb-0.5 no-scrollbar text-xs font-mono font-bold">
+            <!-- 3. CATEGORY FILTER (অ্যাডমিনের সিরিয়াল অনুযায়ী; প্রথম লাইনে ৪–৫টা, বাকিগুলো More চাপলে) -->
+            <?php if (count($availableCategories) > 1): ?>
+            <div id="vpCatBar" class="vp-cat-bar" role="tablist" aria-label="Product categories">
                 <?php foreach ($availableCategories as $idx => $cat): ?>
-                    <button type="button" onclick="filterByCategory(<?= htmlspecialchars(json_encode((string)$cat), ENT_QUOTES) ?>, this)" class="category-pill <?= $idx === 0 ? 'active' : '' ?> px-3.5 py-1.5 rounded-xl flex items-center space-x-1 flex-shrink-0 text-[11px]">
+                    <button type="button" role="tab" data-cat="<?= htmlspecialchars((string)$cat) ?>" onclick="filterByCategory(<?= htmlspecialchars(json_encode((string)$cat), ENT_QUOTES) ?>, this)" class="vp-cat-btn category-pill <?= $idx === 0 ? 'active' : '' ?>" title="<?= htmlspecialchars($categoryLabels[$cat] ?? $cat) ?>">
+                        <?php if ($cat === 'ALL'): ?><i class="fa-solid fa-border-all text-[11px]"></i><?php endif; ?>
                         <span><?= htmlspecialchars($categoryLabels[$cat] ?? $cat) ?></span>
                     </button>
                 <?php endforeach; ?>
+                <button type="button" id="vpCatMore" class="vp-cat-btn vp-cat-more" onclick="toggleCategoryBar()" aria-expanded="false" style="display:none">
+                    <span id="vpCatMoreLabel">More</span> <i class="fa-solid fa-chevron-down"></i>
+                </button>
             </div>
+            <?php endif; ?>
 
             <!-- 4. PRODUCTS GRID -->
             <?php if (empty($catalogProducts)): ?>
@@ -6071,17 +6109,66 @@ document.addEventListener('DOMContentLoaded', function() {
                 }, 3500);
             }
         }
+        // 🗂️ ক্যাটাগরি ফিল্টার: শুধু সিলেক্ট করা ক্যাটাগরির প্রোডাক্ট দেখাবে
+        let vpActiveCat = 'ALL';
         function filterByCategory(category, btn) {
-            document.querySelectorAll('.category-pill').forEach(el => {
-                el.className = 'category-pill px-3.5 py-1.5 rounded-xl flex items-center space-x-1 flex-shrink-0 text-[11px] font-mono';
+            vpActiveCat = String(category || 'ALL').toUpperCase();
+            document.querySelectorAll('#vpCatBar .vp-cat-btn[data-cat]').forEach(el => {
+                const on = el.getAttribute('data-cat').toUpperCase() === vpActiveCat;
+                el.classList.toggle('active', on); el.setAttribute('aria-selected', on ? 'true' : 'false');
             });
-            btn.className = 'category-pill active px-3.5 py-1.5 rounded-xl flex items-center space-x-1 flex-shrink-0 text-[11px] font-mono';
+            let shown = 0;
             document.querySelectorAll('.prod-item-box').forEach(c => {
                 const cat = (c.getAttribute('data-category') || '').toUpperCase();
-                if (category === 'ALL' || cat === category.toUpperCase()) c.classList.remove('hidden');
-                else c.classList.add('hidden');
+                const show = vpActiveCat === 'ALL' || cat === vpActiveCat;
+                c.classList.toggle('hidden', !show); if (show) shown++;
             });
+            const grid = document.getElementById('productsGrid');
+            if (grid) {
+                let empty = document.getElementById('vpCatEmpty');
+                if (!empty) {
+                    empty = document.createElement('div'); empty.id = 'vpCatEmpty';
+                    empty.className = 'glass-card rounded-2xl p-6 text-center text-xs text-gray-400 font-bold border border-dashed border-[#1f0f35] hidden';
+                    empty.innerHTML = '<i class="fa-solid fa-box-open text-2xl text-gray-600 block mb-1"></i>No products in this category yet.';
+                    grid.insertAdjacentElement('afterend', empty);
+                }
+                empty.classList.toggle('hidden', shown > 0);
+            }
+            layoutCategoryBar();
         }
+        // প্রথম লাইনে কয়টা বাটন: মোবাইলে ৪, ডেস্কটপে ৫ (বাড়তি থাকলে শেষ ঘরে More)
+        function layoutCategoryBar() {
+            const bar = document.getElementById('vpCatBar'); if (!bar) return;
+            const more = document.getElementById('vpCatMore');
+            const btns = Array.from(bar.querySelectorAll('.vp-cat-btn[data-cat]'));
+            const cols = window.matchMedia('(min-width: 640px)').matches ? 5 : 4;
+            const overflow = btns.length > cols;
+            const firstRow = overflow ? cols - 1 : cols;
+            btns.forEach((b, i) => b.classList.toggle('vp-cat-extra', i >= firstRow));
+            if (!more) return;
+            more.style.display = overflow ? '' : 'none';
+            if (!overflow) { bar.classList.remove('expanded'); return; }
+            const expanded = bar.classList.contains('expanded');
+            // More বাটন সবসময় শেষে থাকবে (বন্ধ অবস্থায় প্রথম লাইনের শেষ ঘরে, খোলা অবস্থায় সবার শেষে)
+            bar.appendChild(more);
+            if (!expanded) bar.insertBefore(more, btns[firstRow] || null);
+            const hiddenActive = btns.find((b, i) => i >= firstRow && b.classList.contains('active'));
+            const extraCount = btns.length - firstRow;
+            const lbl = document.getElementById('vpCatMoreLabel');
+            if (lbl) lbl.innerHTML = expanded ? 'Less' : (hiddenActive ? (hiddenActive.textContent.trim()) : `More <span class="vp-cat-count">+${extraCount}</span>`);
+            more.classList.toggle('has-active', !expanded && !!hiddenActive);
+            more.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+        }
+        function toggleCategoryBar() {
+            const bar = document.getElementById('vpCatBar'); if (!bar) return;
+            bar.classList.toggle('expanded');
+            layoutCategoryBar();
+        }
+        (function () {
+            let t = null;
+            window.addEventListener('resize', () => { clearTimeout(t); t = setTimeout(layoutCategoryBar, 120); });
+            if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', layoutCategoryBar); else layoutCategoryBar();
+        })();
 
         // ===================== ADD FUND =====================
         function openDedicatedAddFundScreen(methodId) {

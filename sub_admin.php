@@ -4582,9 +4582,24 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
 
         <!-- 12. STORE SETTINGS TAB (WITH BOT, SUPPORT, REFERRAL & POPUPS) -->
         <section id="tab-settings" class="tab-section hidden space-y-6">
+
+            <!-- 🧭 SETTINGS QUICK NAVIGATION — এক ক্লিকে যেকোনো সেটিংসে -->
+            <div id="vpSettingsNav" class="vpset-nav">
+                <div class="vpset-nav-title"><i class="fa-solid fa-compass"></i> Jump to section</div>
+                <div class="vpset-nav-row">
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-branding" onclick="vpSettingsJump('vpset-branding')"><i class="fa-solid fa-sliders text-yellow-300"></i><span>Branding</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-maintenance" onclick="vpSettingsJump('vpset-maintenance')"><i class="fa-solid fa-screwdriver-wrench text-amber-300"></i><span>Maintenance</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-support" onclick="vpSettingsJump('vpset-support')"><i class="fa-solid fa-headset text-cyan-300"></i><span>Support</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-telegram" onclick="vpSettingsJump('vpset-telegram')"><i class="fa-solid fa-paper-plane text-sky-300"></i><span>Telegram Bot</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-referral" onclick="vpSettingsJump('vpset-referral')"><i class="fa-solid fa-gift text-amber-300"></i><span>Referral</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-categories" onclick="vpSettingsJump('vpset-categories')"><i class="fa-solid fa-layer-group text-purple-300"></i><span>Categories</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-popups" onclick="vpSettingsJump('vpset-popups')"><i class="fa-solid fa-window-restore text-fuchsia-300"></i><span>Pop-ups</span></button>
+                    <button type="button" class="vpset-nav-btn" data-target="vpset-banners" onclick="vpSettingsJump('vpset-banners')"><i class="fa-solid fa-images text-pink-300"></i><span>Banners</span></button>
+                </div>
+            </div>
             
             <!-- A. BRANDING, MAINTENANCE & SUPPORT CONTACTS -->
-            <div class="box-panel p-5 space-y-5">
+            <div id="vpset-branding" class="vpset-anchor box-panel p-5 space-y-5">
                 <div class="pb-3 border-b border-slate-800">
                     <h3 class="text-xs font-bold text-yellow-400 uppercase tracking-wider font-mono">
                         <i class="fa-solid fa-sliders text-yellow-400 mr-1.5"></i> STORE BRANDING, SUPPORT &amp; MAINTENANCE
@@ -4596,7 +4611,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                     <input type="hidden" name="active_tab" value="tab-settings">
 
                     <!-- Maintenance Mode with Dedicated Telegram Channel Link -->
-                    <div class="p-4 rounded-2xl border border-amber-500/30 bg-amber-950/20 space-y-3">
+                    <div id="vpset-maintenance" class="vpset-anchor p-4 rounded-2xl border border-amber-500/30 bg-amber-950/20 space-y-3">
                         <div class="flex items-center justify-between">
                             <div>
                                 <span class="text-amber-300 font-bold text-xs block">Store-Wide Maintenance Mode</span>
@@ -4612,7 +4627,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                     </div>
 
                     <!-- Store Support Settings (Direct Telegram & WhatsApp - NO REDIRECT TO MOTHER BOT) -->
-                    <div class="p-4 rounded-2xl border border-cyan-500/30 bg-cyan-950/20 space-y-3">
+                    <div id="vpset-support" class="vpset-anchor p-4 rounded-2xl border border-cyan-500/30 bg-cyan-950/20 space-y-3">
                         <span class="text-xs font-bold text-cyan-300 uppercase block font-sans">
                             <i class="fa-solid fa-headset mr-1"></i> Dedicated Store Support (Your Own Telegram &amp; WhatsApp)
                         </span>
@@ -4692,7 +4707,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             </div>
 
             <!-- B. TELEGRAM BOT NOTIFICATION INTEGRATION (FOR THIS SUB-STORE) -->
-            <div class="box-panel p-5 space-y-4 border-cyan-500/30 bg-gradient-to-r from-[#031525] to-[#070d20]">
+            <div id="vpset-telegram" class="vpset-anchor box-panel p-5 space-y-4 border-cyan-500/30 bg-gradient-to-r from-[#031525] to-[#070d20]">
                 <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                     <div>
                         <h3 class="text-xs font-black text-cyan-300 uppercase tracking-wider flex items-center gap-2">
@@ -4758,7 +4773,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             </div>
 
             <!-- C. REFERRAL & TOKEN REWARDS SYSTEM (SUB-ADMIN) -->
-            <div class="box-panel p-5 space-y-4 border-amber-500/30 bg-gradient-to-r from-[#211202] to-[#070d20]">
+            <div id="vpset-referral" class="vpset-anchor box-panel p-5 space-y-4 border-amber-500/30 bg-gradient-to-r from-[#211202] to-[#070d20]">
                 <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                     <div>
                         <h3 class="text-xs font-black text-amber-300 uppercase tracking-wider flex items-center gap-2">
@@ -4799,7 +4814,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             </div>
 
             <!-- D. PRODUCT CATEGORIES SEQUENCE & ORDERING -->
-            <div class="box-panel p-5 space-y-4 border-purple-500/30">
+            <div id="vpset-categories" class="vpset-anchor box-panel p-5 space-y-4 border-purple-500/30">
                 <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                     <div>
                         <h3 class="text-xs font-black text-purple-300 uppercase tracking-wider flex items-center gap-2">
@@ -4873,7 +4888,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             </div>
 
             <!-- E. CUSTOM ENTRY POP-UP MANAGER -->
-            <div class="box-panel p-5 space-y-4 border-fuchsia-500/30">
+            <div id="vpset-popups" class="vpset-anchor box-panel p-5 space-y-4 border-fuchsia-500/30">
                 <div class="flex items-center justify-between pb-3 border-b border-slate-800">
                     <div>
                         <h3 class="text-xs font-black text-fuchsia-300 uppercase tracking-wider flex items-center gap-2">
@@ -4956,7 +4971,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             </div>
 
             <!-- F. PROMOTIONAL BANNERS CAROUSEL -->
-            <div class="box-panel p-5 space-y-4 font-mono">
+            <div id="vpset-banners" class="vpset-anchor box-panel p-5 space-y-4 font-mono">
                 <h4 class="text-xs font-bold text-fuchsia-400 uppercase tracking-wider">PROMOTIONAL BANNERS SLIDER</h4>
                 <form method="POST" enctype="multipart/form-data" class="grid grid-cols-1 sm:grid-cols-3 gap-2.5 text-xs">
                     <input type="hidden" name="admin_action" value="add_banner">
@@ -6484,6 +6499,62 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
         const f = e.target.form;
         if (f && f.querySelectorAll('button[type="submit"][name="type"]').length > 1) e.preventDefault();
     }, true);
+})();
+</script>
+
+<style>
+/* 🧭 Site Settings নেভিগেশন */
+.vpset-nav { position: relative; z-index: 30; box-sizing: border-box; background: rgba(5,8,22,.92); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); border: 1px solid rgba(34,211,238,.25); border-radius: 18px; padding: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.45); }
+.vpset-nav-title { font-size: 10px; font-weight: 900; letter-spacing: .12em; text-transform: uppercase; color: #67e8f9; margin: 0 2px 8px; display: flex; align-items: center; gap: 6px; font-family: ui-monospace, monospace; }
+.vpset-nav-row { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+@media (min-width: 900px) { .vpset-nav-row { grid-template-columns: repeat(8, minmax(0, 1fr)); } }
+.vpset-nav-btn { box-sizing: border-box; min-height: 44px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 3px; padding: 6px 4px; border-radius: 12px; background: #0b1124; border: 1px solid #1e293b; color: #cbd5e1; font-size: 10.5px; font-weight: 800; line-height: 1.1; text-align: center; transition: all .18s ease; font-family: ui-monospace, monospace; }
+.vpset-nav-btn i { font-size: 13px; }
+.vpset-nav-btn:hover { border-color: rgba(34,211,238,.6); color: #fff; transform: translateY(-1px); }
+.vpset-nav-btn.active { background: linear-gradient(135deg, rgba(34,211,238,.22), rgba(217,70,239,.22)); border-color: #22d3ee; color: #fff; box-shadow: 0 0 12px rgba(34,211,238,.25); }
+.vpset-nav.is-pinned { position: fixed; top: 8px; z-index: 45; }
+@media (max-width: 899px) { .vpset-nav.is-pinned .vpset-nav-title { display: none; } .vpset-nav.is-pinned .vpset-nav-row { display: flex; overflow-x: auto; scrollbar-width: none; } .vpset-nav.is-pinned .vpset-nav-row::-webkit-scrollbar { display: none; } .vpset-nav.is-pinned .vpset-nav-btn { flex: 0 0 auto; min-width: 84px; flex-direction: row; gap: 5px; min-height: 38px; padding: 6px 10px; } }
+.vpset-anchor { scroll-margin-top: 72px; }
+@media (min-width: 900px) { .vpset-anchor { scroll-margin-top: 112px; } }
+.vpset-flash { animation: vpsetFlash 1.1s ease-out; }
+@keyframes vpsetFlash { 0% { box-shadow: 0 0 0 2px rgba(34,211,238,.9); } 100% { box-shadow: 0 0 0 2px rgba(34,211,238,0); } }
+</style>
+<script>
+// 🧭 Settings নেভিগেশন: বাটনে চাপলে সেই সেকশনে স্মুথ স্ক্রল + স্ক্রলের সাথে বাটন হাইলাইট
+function vpSettingsJump(id) {
+    const el = document.getElementById(id); if (!el) return;
+    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    el.classList.remove('vpset-flash'); void el.offsetWidth; el.classList.add('vpset-flash');
+    document.querySelectorAll('.vpset-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.target === id));
+}
+(function () {
+    function onScroll() {
+        const sec = document.getElementById('tab-settings'); if (!sec || sec.classList.contains('hidden')) return;
+        const btns = Array.from(document.querySelectorAll('.vpset-nav-btn')); let cur = null;
+        btns.forEach(b => { const t = document.getElementById(b.dataset.target); if (t && t.getBoundingClientRect().top < 140) cur = b.dataset.target; });
+        if (!cur && btns[0]) cur = btns[0].dataset.target;
+        btns.forEach(b => b.classList.toggle('active', b.dataset.target === cur));
+        // পিন করা (এক লাইনের) বারে অ্যাক্টিভ বাটন মাঝখানে দেখাবে
+        const act = btns.find(b => b.dataset.target === cur); const row = act && act.parentElement;
+        if (row && row.scrollWidth > row.clientWidth + 2) { const want = act.offsetLeft - (row.clientWidth - act.offsetWidth) / 2; if (Math.abs(row.scrollLeft - want) > 8) row.scrollTo({ left: Math.max(0, want), behavior: 'smooth' }); }
+    }
+    // স্ক্রল করলেও নেভিগেশন বার উপরে আটকে থাকবে (মোবাইলে এক লাইনে স্লাইড করা যায়)
+    let ph = null;
+    function pin() {
+        const nav = document.getElementById('vpSettingsNav'); const sec = document.getElementById('tab-settings');
+        if (!nav || !sec) return;
+        if (!ph) { ph = document.createElement('div'); ph.id = 'vpSettingsNavPh'; nav.parentNode.insertBefore(ph, nav); }
+        if (sec.classList.contains('hidden')) { nav.classList.remove('is-pinned'); nav.style.left = nav.style.width = ''; ph.style.height = '0px'; return; }
+        const anchor = ph.getBoundingClientRect(); const secR = sec.getBoundingClientRect();
+        const shouldPin = anchor.top < 8 && secR.bottom > 160;
+        if (shouldPin && !nav.classList.contains('is-pinned')) { ph.style.height = nav.offsetHeight + 'px'; nav.classList.add('is-pinned'); }
+        if (!shouldPin && nav.classList.contains('is-pinned')) { nav.classList.remove('is-pinned'); ph.style.height = '0px'; nav.style.left = nav.style.width = ''; }
+        if (nav.classList.contains('is-pinned')) { nav.style.left = anchor.left + 'px'; nav.style.width = anchor.width + 'px'; }
+    }
+    let raf = 0; const tick = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { pin(); onScroll(); }); };
+    window.addEventListener('scroll', tick, { passive: true }); window.addEventListener('resize', tick);
+    document.addEventListener('click', () => setTimeout(tick, 50));
+    document.addEventListener('DOMContentLoaded', onScroll);
 })();
 </script>
 </body>
