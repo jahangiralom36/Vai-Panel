@@ -4660,7 +4660,7 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
 
             <!-- 🧭 SETTINGS QUICK NAVIGATION — এক ক্লিকে যেকোনো সেটিংসে -->
             <div id="vpSettingsNav" class="vpset-nav">
-                <div class="vpset-nav-title"><i class="fa-solid fa-compass"></i> Jump to section</div>
+                <div class="vpset-nav-title"><i class="fa-solid fa-compass"></i> Choose a settings section</div>
                 <div class="vpset-nav-row">
                     <button type="button" class="vpset-nav-btn" data-target="vpset-branding" onclick="vpSettingsJump('vpset-branding')"><i class="fa-solid fa-sliders text-yellow-300"></i><span>Branding</span></button>
                     <button type="button" class="vpset-nav-btn" data-target="vpset-maintenance" onclick="vpSettingsJump('vpset-maintenance')"><i class="fa-solid fa-screwdriver-wrench text-amber-300"></i><span>Maintenance</span></button>
@@ -6862,42 +6862,43 @@ $mainThemeColor = $settings['main_site_theme_color'] ?? '#00f5ff';
 @keyframes vpsetFlash { 0% { box-shadow: 0 0 0 2px rgba(34,211,238,.9); } 100% { box-shadow: 0 0 0 2px rgba(34,211,238,0); } }
 </style>
 <script>
-// 🧭 Settings নেভিগেশন: বাটনে চাপলে সেই সেকশনে স্মুথ স্ক্রল + স্ক্রলের সাথে বাটন হাইলাইট
-function vpSettingsJump(id) {
-    const el = document.getElementById(id); if (!el) return;
-    el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    el.classList.remove('vpset-flash'); void el.offsetWidth; el.classList.add('vpset-flash');
-    document.querySelectorAll('.vpset-nav-btn').forEach(b => b.classList.toggle('active', b.dataset.target === id));
+// 🧭 Site Settings নেভিগেশন: যে বাটনে চাপবেন শুধু সেই সেকশন দেখাবে, বাকি সব লুকানো থাকবে
+// (Maintenance / Support ব্র্যান্ডিং ফর্মের ভেতরে — তাই সেগুলোর সাথে শুধু Save বাটন দেখাবে; অন্য ঘরের ডাটা লুকানো থাকলেও সেভে ঠিক থাকে)
+const VPSET_INNER = ['vpset-maintenance', 'vpset-support'];
+function vpSettingsShow(id, scroll) {
+    const sec = document.getElementById('tab-settings'); if (!sec) return;
+    const target = document.getElementById(id) || document.getElementById('vpset-branding'); if (!target) return;
+    id = target.id;
+    const card = VPSET_INNER.includes(id) ? document.getElementById('vpset-branding') : target;
+    // ১) উপরের লেভেলের কার্ড: শুধু নির্বাচিতটা
+    Array.from(sec.children).forEach(el => {
+        if (el.id === 'vpSettingsNav' || el.id === 'vpSettingsNavPh' || el.tagName === 'SCRIPT' || el.tagName === 'STYLE') return;
+        el.style.display = (el === card) ? '' : 'none';
+    });
+    // ২) ব্র্যান্ডিং ফর্মের ভেতরে: Branding = Maintenance/Support ছাড়া সব; Maintenance/Support = শুধু সেটা + Save
+    const form = document.querySelector('#vpset-branding form');
+    if (form) Array.from(form.children).forEach(el => {
+        if (el.tagName === 'INPUT' && el.type === 'hidden') return;
+        const isSave = el.matches('button[type="submit"]') || !!el.querySelector('button[type="submit"]');
+        let show;
+        if (id === 'vpset-branding') show = !VPSET_INNER.includes(el.id);
+        else if (VPSET_INNER.includes(id)) show = (el.id === id) || isSave;
+        else show = true;
+        el.style.display = show ? '' : 'none';
+    });
+    document.querySelectorAll('.vpset-nav-btn').forEach(b => {
+        const on = b.dataset.target === id; b.classList.toggle('active', on); b.setAttribute('aria-pressed', on ? 'true' : 'false');
+    });
+    card.classList.remove('vpset-flash'); void card.offsetWidth; card.classList.add('vpset-flash');
+    try { localStorage.setItem('vpset_last_' + location.pathname, id); } catch (e) {}
+    if (scroll) { const nav = document.getElementById('vpSettingsNav'); if (nav && nav.getBoundingClientRect().top < 0) nav.scrollIntoView({ behavior: 'smooth', block: 'start' }); }
 }
-(function () {
-    function onScroll() {
-        const sec = document.getElementById('tab-settings'); if (!sec || sec.classList.contains('hidden')) return;
-        const btns = Array.from(document.querySelectorAll('.vpset-nav-btn')); let cur = null;
-        btns.forEach(b => { const t = document.getElementById(b.dataset.target); if (t && t.getBoundingClientRect().top < 140) cur = b.dataset.target; });
-        if (!cur && btns[0]) cur = btns[0].dataset.target;
-        btns.forEach(b => b.classList.toggle('active', b.dataset.target === cur));
-        // পিন করা (এক লাইনের) বারে অ্যাক্টিভ বাটন মাঝখানে দেখাবে
-        const act = btns.find(b => b.dataset.target === cur); const row = act && act.parentElement;
-        if (row && row.scrollWidth > row.clientWidth + 2) { const want = act.offsetLeft - (row.clientWidth - act.offsetWidth) / 2; if (Math.abs(row.scrollLeft - want) > 8) row.scrollTo({ left: Math.max(0, want), behavior: 'smooth' }); }
-    }
-    // স্ক্রল করলেও নেভিগেশন বার উপরে আটকে থাকবে (মোবাইলে এক লাইনে স্লাইড করা যায়)
-    let ph = null;
-    function pin() {
-        const nav = document.getElementById('vpSettingsNav'); const sec = document.getElementById('tab-settings');
-        if (!nav || !sec) return;
-        if (!ph) { ph = document.createElement('div'); ph.id = 'vpSettingsNavPh'; nav.parentNode.insertBefore(ph, nav); }
-        if (sec.classList.contains('hidden')) { nav.classList.remove('is-pinned'); nav.style.left = nav.style.width = ''; ph.style.height = '0px'; return; }
-        const anchor = ph.getBoundingClientRect(); const secR = sec.getBoundingClientRect();
-        const shouldPin = anchor.top < 8 && secR.bottom > 160;
-        if (shouldPin && !nav.classList.contains('is-pinned')) { ph.style.height = nav.offsetHeight + 'px'; nav.classList.add('is-pinned'); }
-        if (!shouldPin && nav.classList.contains('is-pinned')) { nav.classList.remove('is-pinned'); ph.style.height = '0px'; nav.style.left = nav.style.width = ''; }
-        if (nav.classList.contains('is-pinned')) { nav.style.left = anchor.left + 'px'; nav.style.width = anchor.width + 'px'; }
-    }
-    let raf = 0; const tick = () => { cancelAnimationFrame(raf); raf = requestAnimationFrame(() => { pin(); onScroll(); }); };
-    window.addEventListener('scroll', tick, { passive: true }); window.addEventListener('resize', tick);
-    document.addEventListener('click', () => setTimeout(tick, 50));
-    document.addEventListener('DOMContentLoaded', onScroll);
-})();
+function vpSettingsJump(id) { vpSettingsShow(id, true); }
+document.addEventListener('DOMContentLoaded', () => {
+    let last = 'vpset-branding';
+    try { last = localStorage.getItem('vpset_last_' + location.pathname) || last; } catch (e) {}
+    vpSettingsShow(last, false); // সেভ করার পর পেজ রিলোড হলেও একই সেকশনে থাকবে
+});
 </script>
 </body>
 </html>
