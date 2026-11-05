@@ -40,6 +40,12 @@ if (isset($_GET['logout']) || (isset($_GET['action']) && $_GET['action'] === 'lo
 // ====================================================================
 // 2. SUBDOMAIN & TENANT RESOLUTION (STRICT DOMAIN ISOLATION)
 // ====================================================================
+// 🔐 অ্যাকাউন্ট শুধু অ্যাডমিন Ban/Block করলেই বন্ধ হবে — ব্যালেন্স কমানো/০ হওয়ার সাথে কোনো সম্পর্ক নেই
+if (!function_exists('vpUserIsActive')) {
+    function vpUserIsActive($status): bool {
+        return !in_array(strtolower(trim((string)$status)), ['banned', 'blocked', 'suspended', 'inactive', '0', 'disabled'], true);
+    }
+}
 $currentHost = strtolower($_SERVER['HTTP_HOST'] ?? '');
 $currentHost = preg_replace('/:\d+$/', '', $currentHost);
 $currentHost = preg_replace('/^www\./', '', $currentHost);
@@ -804,7 +810,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
         $rowUser = $stmtChk->fetch(PDO::FETCH_ASSOC);
 
         if ($rowUser) {
-            if (($rowUser['status'] ?? 'active') !== 'active') {
+            if (!vpUserIsActive($rowUser['status'] ?? 'active')) {
                 echo json_encode(['status' => 'error', 'message' => 'Account is suspended on this store!']);
                 exit;
             }
@@ -906,7 +912,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['auth_action'])) {
         $rowUser = $stmt->fetch(PDO::FETCH_ASSOC);
 
         if ($rowUser && (password_verify($password, $rowUser['password']) || $password === $rowUser['password'])) {
-            if (($rowUser['status'] ?? 'active') !== 'active') {
+            if (!vpUserIsActive($rowUser['status'] ?? 'active')) {
                 $_SESSION['flash_toast'] = ['type' => 'error', 'msg' => 'Account is suspended on this store!'];
                 header('Location: index.php');
                 exit;
@@ -1038,7 +1044,7 @@ if ($userId > 0) {
         $stmt->execute([$userId, $currentSubdomainId]);
         $fetchedUser = $stmt->fetch(PDO::FETCH_ASSOC);
 
-        if ($fetchedUser && ($fetchedUser['status'] ?? 'active') === 'active') {
+        if ($fetchedUser && vpUserIsActive($fetchedUser['status'] ?? 'active')) {
             $user       = $fetchedUser;
             $isLoggedIn = true;
 
@@ -1092,12 +1098,18 @@ $userBalanceBdt   = round((float)$user['balance'] * $effectiveBdtRate, 0);
 $userCustomPrices    = [];
 $userAllowedProducts = [];
 
-if ($isLoggedIn && $userRole === 'reseller') {
+// 💰 দাম সবসময় লাইভ হিসাব: প্ল্যানের দাম + প্ল্যান ডিসকাউন্ট + ইউজারের নিজস্ব এক্সট্রা ডিসকাউন্ট।
+// user_custom_prices থেকে শুধু অ্যাডমিনের হাতে বসানো (is_manual = 1) দাম আসবে — পুরনো অটো-স্ন্যাপশট আর আসবে না।
+$vpUserExtraDisc = $isLoggedIn ? max(0.0, min(99.0, (float)($user['discount_percent'] ?? 0))) : 0.0;
+if ($isLoggedIn) {
     try {
-        $stmtUCP = $pdo->prepare("SELECT plan_id, custom_price FROM user_custom_prices WHERE user_id = ?");
+        $stmtUCP = $pdo->prepare("SELECT plan_id, custom_price FROM user_custom_prices WHERE user_id = ? AND is_manual = 1");
         $stmtUCP->execute([$user['id']]);
         $userCustomPrices = $stmtUCP->fetchAll(PDO::FETCH_KEY_PAIR);
-
+    } catch (Throwable $e) { $userCustomPrices = []; }
+}
+if ($isLoggedIn && $userRole === 'reseller') {
+    try {
         if ((int)($user['is_product_restricted'] ?? 0) === 1) {
             $stmtUAP = $pdo->prepare("SELECT product_id FROM user_allowed_products WHERE user_id = ?");
             $stmtUAP->execute([$user['id']]);
@@ -1107,30 +1119,8 @@ if ($isLoggedIn && $userRole === 'reseller') {
     } catch (Throwable $e) {}
 }
 
+// গেস্টদের জন্য আর কোনো কাস্টমারের ব্যক্তিগত দাম ব্যবহার হবে না (আগে MIN স্ন্যাপশট থেকে পুরনো দাম দেখাত)
 $defaultCustomerPrices = [];
-try {
-    if ($tenant) {
-        $stmtDCP = $pdo->prepare("SELECT ucp.plan_id, MIN(ucp.custom_price) 
-            FROM user_custom_prices ucp
-            JOIN users u ON u.id = ucp.user_id
-            WHERE u.subdomain_id = ? AND (u.role = 'customer' OR u.role IS NULL OR u.role = '')
-            GROUP BY ucp.plan_id");
-        $stmtDCP->execute([$currentSubdomainId]);
-        if ($stmtDCP) {
-            $defaultCustomerPrices = $stmtDCP->fetchAll(PDO::FETCH_KEY_PAIR);
-        }
-    } else {
-        $stmtDCP = $pdo->query("SELECT ucp.plan_id, MIN(ucp.custom_price) 
-            FROM user_custom_prices ucp
-            JOIN users u ON u.id = ucp.user_id
-            WHERE (u.subdomain_id = 0 OR u.subdomain_id IS NULL OR u.subdomain_id = '') 
-              AND (u.role = 'customer' OR u.role IS NULL OR u.role = '')
-            GROUP BY ucp.plan_id");
-        if ($stmtDCP && is_object($stmtDCP)) {
-            $defaultCustomerPrices = $stmtDCP->fetchAll(PDO::FETCH_KEY_PAIR);
-        }
-    }
-} catch (Throwable $e) {}
 
 // ====================================================================
 // 7. KEY MANAGER REST HANDLER
@@ -1373,6 +1363,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'verify_and_delive
         $explicitDiscount = ($userRole === 'reseller')
             ? (float)($plan['reseller_discount_percent'] ?? 0)
             : (float)($plan['discount_percent'] ?? 0);
+        $explicitDiscount = min(99.0, max(0.0, $explicitDiscount) + $vpUserExtraDisc);
         if ($explicitDiscount >= 0) {
             $unitPrice = round($basePrice * (1 - ($explicitDiscount / 100)), 2);
         } else {
@@ -1861,6 +1852,7 @@ if (isset($_POST['ajax_action']) && $_POST['ajax_action'] === 'live_generate') {
         $explicitDiscount = ($userRole === 'reseller')
             ? (float)($plan['reseller_discount_percent'] ?? 0)
             : (float)($plan['discount_percent'] ?? 0);
+        $explicitDiscount = min(99.0, max(0.0, $explicitDiscount) + $vpUserExtraDisc);
         if ($explicitDiscount >= 0) {
             $unitPrice = round($basePrice * (1 - ($explicitDiscount / 100)), 2);
         } else {
@@ -2747,6 +2739,7 @@ try {
         } else {
             $explicitDiscount = (float)($dp['discount_percent'] ?? 0);
         }
+        $explicitDiscount = min(99.0, max(0.0, $explicitDiscount) + $vpUserExtraDisc);
 
         $origRetailUSD = $regularBaseUSD;
         $planDiscount  = 0;

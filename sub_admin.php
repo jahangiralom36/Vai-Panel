@@ -700,48 +700,14 @@ if (!function_exists('vpCategorySelect')) {
 }
 
 function syncTenantStackedPricesForUser(PDO $pdo, int $userId, int $subId) {
+    // 💰 স্টোর এখন দাম লাইভ হিসাব করে (প্ল্যান দাম + প্ল্যান ডিসকাউন্ট + ইউজার ডিসকাউন্ট)।
+    // তাই এখানে আর পুরনো দামের স্ন্যাপশট লেখা হয় না — শুধু এই ইউজারের পুরনো অটো-রো মুছে দেওয়া হয়;
+    // অ্যাডমিনের হাতে বসানো দাম (is_manual = 1) থেকে যায়।
     try {
-        $stmtUser = $pdo->prepare("SELECT id, role, discount_percent FROM users WHERE id = ? AND subdomain_id = ? LIMIT 1");
-        $stmtUser->execute([$userId, $subId]);
-        $u = $stmtUser->fetch(PDO::FETCH_ASSOC);
-        if (!$u) return;
-
-        $userDisc = (float)($u['discount_percent'] ?? 0);
-        $role     = strtolower(trim((string)($u['role'] ?? 'customer')));
-
-        $plansStmt = $pdo->prepare("SELECT pp.id, pp.user_price, pp.reseller_price, pp.regular_price, pp.discount_percent, pp.reseller_discount_percent 
-                                    FROM product_plans pp 
-                                    JOIN products p ON pp.product_id = p.id 
-                                    WHERE p.subdomain_id = ?");
-        $plansStmt->execute([$subId]);
-        $plans = $plansStmt->fetchAll(PDO::FETCH_ASSOC);
-        if (empty($plans)) return;
-
-        $pdo->prepare("DELETE FROM user_custom_prices WHERE user_id = ?")->execute([$userId]);
-        $insPrice = $pdo->prepare("INSERT INTO user_custom_prices (user_id, plan_id, custom_price) VALUES (?, ?, ?)");
-
-        foreach ($plans as $pl) {
-            $planDisc = (float)($pl['discount_percent'] ?? 0);
-            if ($role === 'reseller' && (float)($pl['reseller_discount_percent'] ?? 0) > $planDisc) {
-                $planDisc = (float)$pl['reseller_discount_percent'];
-            }
-
-            $totalDisc = min(99.0, max(0.0, $planDisc + $userDisc));
-
-            $regPrice = (float)($pl['regular_price'] ?? 0);
-            if ($regPrice <= 0) $regPrice = (float)($pl['user_price'] ?? 0);
-
-            $resellBase = (float)($pl['reseller_price'] ?? 0);
-            if ($resellBase <= 0) $resellBase = $regPrice;
-
-            $baseRegular = ($role === 'reseller') ? $resellBase : $regPrice;
-            if ($baseRegular <= 0) $baseRegular = 1.00;
-
-            if ($totalDisc > 0) {
-                $calcPrice = max(0.01, round($baseRegular * (1 - ($totalDisc / 100)), 2));
-                $insPrice->execute([$userId, (int)$pl['id'], $calcPrice]);
-            }
-        }
+        $st = $pdo->prepare("SELECT id FROM users WHERE id = ? AND subdomain_id = ? LIMIT 1");
+        $st->execute([$userId, $subId]);
+        if (!$st->fetchColumn()) return;
+        $pdo->prepare("DELETE FROM user_custom_prices WHERE user_id = ? AND is_manual = 0")->execute([$userId]);
     } catch (Throwable $e) {}
 }
 
@@ -876,6 +842,139 @@ if (isset($_GET['action']) && $_GET['action'] === 'fetch_km_catalog') {
     exit;
 }
 
+// ====================================================================
+// 🛡️ ONE-TIME FORM TOKEN + SAFE WALLET / PLAN HELPERS
+// প্রতিটা ফর্ম সাবমিট একবারই চলবে (রিফ্রেশ / ডাবল-ট্যাপ / ব্রাউজার রি-সাবমিটে আবার চলবে না)
+// ====================================================================
+if (!function_exists('vpNormalizeTgLink')) {
+    // টেলিগ্রাম লিংক ঠিক করা: @channel → https://t.me/channel ; শুধু http(s) / tg:// গ্রহণ
+    function vpNormalizeTgLink(string $l): string {
+        $l = trim($l);
+        if ($l === '') return '';
+        if ($l[0] === '@') $l = 'https://t.me/' . substr($l, 1);
+        elseif (preg_match('#^(t\.me|telegram\.me)/#i', $l)) $l = 'https://' . $l;
+        if (!preg_match('#^(https?://|tg://)#i', $l)) return '';
+        return mb_substr($l, 0, 255);
+    }
+}
+if (!function_exists('vpPlanLockSql')) {
+    // price_locked কলাম থাকলে: অ্যাডমিনের এডিট করা প্ল্যান KM সিঙ্কে আর ওভাররাইট হবে না
+    function vpPlanLockSql(PDO $pdo): string {
+        static $has = null;
+        if ($has === null) { try { $has = (bool)$pdo->query("SHOW COLUMNS FROM product_plans LIKE 'price_locked'")->fetch(); } catch (Throwable $e) { $has = false; } }
+        return $has ? ' AND COALESCE(price_locked, 0) = 0' : '';
+    }
+}
+if (!function_exists('vpFormOnceCheck')) {
+    function vpFormOnceCheck(): bool {
+        $tok = (string)($_POST['_vp_once'] ?? '');
+        if ($tok === '' || !preg_match('/^[A-Za-z0-9_-]{16,64}$/', $tok)) return true; // পুরনো ফর্ম/AJAX — আগের মতোই চলবে
+        $used = $_SESSION['vp_once_used'] ?? [];
+        if (!is_array($used)) $used = [];
+        if (isset($used[$tok])) return false;
+        $used[$tok] = time();
+        if (count($used) > 300) { asort($used); $used = array_slice($used, -300, null, true); }
+        $_SESSION['vp_once_used'] = $used;
+        return true;
+    }
+}
+if (!function_exists('vpWalletAdjust')) {
+    /**
+     * Float (balance) বা Coins একবারই যোগ/বিয়োগ করে। স্ট্যাটাস (active/banned) কখনো বদলায় না।
+     * ডিডাক্ট বেশি হলে ০-তে থামে (নেগেটিভ হয় না)। request_token দিয়ে DB-লেভেলেও ডুপ্লিকেট আটকানো।
+     */
+    function vpWalletAdjust(PDO $pdo, int $userId, int $subId, string $field, float $amount, string $mode, string $token = '', string $adminName = ''): array {
+        $field = ($field === 'coins') ? 'coins' : 'balance';
+        if (!in_array($mode, ['add', 'deduct'], true)) return ['ok' => false, 'msg' => 'Please press Add or Deduct.'];
+        if ($field === 'coins') $amount = (float)(int)round($amount); else $amount = round($amount, 4);
+        if (!($amount > 0)) return ['ok' => false, 'msg' => 'Enter an amount greater than 0.'];
+        if ($amount > 1000000000) return ['ok' => false, 'msg' => 'Amount is too large.'];
+        $ownTx = !$pdo->inTransaction();
+        try {
+            if ($ownTx) $pdo->beginTransaction();
+            $st = $pdo->prepare("SELECT `$field` FROM users WHERE id = ? AND subdomain_id = ? LIMIT 1 FOR UPDATE");
+            $st->execute([$userId, $subId]);
+            $before = $st->fetchColumn();
+            if ($before === false) { if ($ownTx) $pdo->rollBack(); return ['ok' => false, 'msg' => 'User not found in this store.']; }
+            $before = (float)$before;
+            $after  = ($mode === 'add') ? $before + $amount : max(0.0, $before - $amount);
+            if ($field === 'coins') $after = (float)(int)round($after); else $after = round($after, 4);
+            $logId = 0;
+            if ($token !== '') {
+                try {
+                    $pdo->prepare("INSERT INTO wallet_adjust_logs (subdomain_id, user_id, admin_name, field, change_amount, before_value, after_value, request_token) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+                        ->execute([$subId, $userId, mb_substr($adminName, 0, 100), $field, $after - $before, $before, $after, $token]);
+                    $logId = (int)$pdo->lastInsertId();
+                } catch (PDOException $e) {
+                    if ((string)$e->getCode() === '23000') { if ($ownTx) $pdo->rollBack(); return ['ok' => false, 'dup' => true, 'msg' => 'This request was already processed (not applied twice).']; }
+                    // লগ টেবিল না থাকলেও (database.sql ইমপোর্ট না করলে) অ্যাড/ডিডাক্ট ঠিকই হবে
+                }
+            }
+            $pdo->prepare("UPDATE users SET `$field` = ? WHERE id = ? AND subdomain_id = ?")->execute([$field === 'coins' ? (int)$after : $after, $userId, $subId]);
+            if ($ownTx) $pdo->commit();
+            return ['ok' => true, 'before' => $before, 'after' => $after, 'applied' => abs($after - $before), 'capped' => ($mode === 'deduct' && $before < $amount)];
+        } catch (Throwable $e) {
+            if ($ownTx && $pdo->inTransaction()) $pdo->rollBack();
+            return ['ok' => false, 'msg' => 'Could not update: ' . $e->getMessage()];
+        }
+    }
+}
+if (!function_exists('vpWalletToast')) {
+    function vpWalletToast(array $r, string $field, string $mode): array {
+        if (empty($r['ok'])) return ['type' => 'error', 'msg' => $r['msg'] ?? 'Failed'];
+        $fmt = function ($v) use ($field) { return $field === 'coins' ? '🪙 ' . number_format($v, 0) : '$' . number_format($v, 2); };
+        $label = $field === 'coins' ? 'Coins' : 'Float';
+        $msg = $label . ' ' . ($mode === 'add' ? 'added: +' : 'deducted: -') . $fmt($r['applied']) . ' • ' . $fmt($r['before']) . ' → ' . $fmt($r['after']);
+        if (!empty($r['capped'])) $msg .= ' (stopped at 0)';
+        return ['type' => 'success', 'msg' => $msg];
+    }
+}
+if (!function_exists('vpSavePlanRow')) {
+    /**
+     * একটা প্ল্যান সেভ: নাম, Customer (আসল/রেগুলার) দাম, Reseller দাম, Coins।
+     * Customer দাম = আসল দাম; প্ল্যানে ডিসকাউন্ট থাকলে বিক্রির দাম সেখান থেকে একবারই হিসাব হয়।
+     * শুধু এই স্টোরের (subdomain_id) প্ল্যান আপডেট হয়; সেভ করা প্ল্যান KM সিঙ্কে আর ওভাররাইট হবে না।
+     */
+    function vpSavePlanRow(PDO $pdo, int $planId, int $prodId, int $subId, array $f): bool {
+        $st = $pdo->prepare("SELECT id, discount_percent FROM product_plans WHERE id = ? AND product_id = ? AND subdomain_id = ? LIMIT 1");
+        $st->execute([$planId, $prodId, $subId]);
+        $row = $st->fetch(PDO::FETCH_ASSOC);
+        if (!$row) return false;
+        $sets = []; $vals = [];
+        if (isset($f['title'])) {
+            $t = trim(preg_replace('/\s+/u', ' ', strip_tags((string)$f['title'])));
+            if ($t !== '') { $sets[] = 'plan_title = ?'; $vals[] = mb_substr($t, 0, 100); }
+        }
+        if (isset($f['user'])) {
+            $u = str_replace(',', '.', trim((string)$f['user']));
+            if (is_numeric($u) && (float)$u > 0) {
+                $base = round((float)$u, 2);
+                $d = max(0.0, min(99.0, (float)($row['discount_percent'] ?? 0)));
+                $sets[] = 'regular_price = ?'; $vals[] = $base;
+                $sets[] = 'user_price = ?';    $vals[] = $d > 0 ? max(0.01, round($base * (1 - $d / 100), 2)) : $base;
+            }
+        }
+        if (isset($f['reseller'])) {
+            $r = str_replace(',', '.', trim((string)$f['reseller']));
+            if (is_numeric($r) && (float)$r > 0) { $sets[] = 'reseller_price = ?'; $vals[] = round((float)$r, 2); }
+        }
+        if (isset($f['coins']) && is_numeric($f['coins']))      { $sets[] = 'reward_coins = ?'; $vals[] = max(0, (int)$f['coins']); }
+        if (isset($f['coin_price']) && is_numeric($f['coin_price'])) { $sets[] = 'coin_price = ?'; $vals[] = max(0, (int)$f['coin_price']); }
+        if (!$sets) return false;
+        $vals[] = $planId; $vals[] = $subId;
+        $pdo->prepare("UPDATE product_plans SET " . implode(', ', $sets) . " WHERE id = ? AND subdomain_id = ?")->execute($vals);
+        try { $pdo->prepare("UPDATE product_plans SET price_locked = 1 WHERE id = ? AND subdomain_id = ?")->execute([$planId, $subId]); } catch (Throwable $e) {}
+        return true;
+    }
+}
+if (!function_exists('vpInsertManualPrice')) {
+    // অ্যাডমিনের হাতে বসানো ইউজার-ভিত্তিক দাম (is_manual = 1); কলাম না থাকলে পুরনো ভাবে সেভ
+    function vpInsertManualPrice(PDO $pdo, int $userId, int $planId, float $price): void {
+        try { $pdo->prepare("INSERT INTO user_custom_prices (user_id, plan_id, custom_price, is_manual) VALUES (?, ?, ?, 1)")->execute([$userId, $planId, $price]); }
+        catch (Throwable $e) { $pdo->prepare("INSERT INTO user_custom_prices (user_id, plan_id, custom_price) VALUES (?, ?, ?)")->execute([$userId, $planId, $price]); }
+    }
+}
+
 $toast = null;
 $activeTab = $_POST['active_tab'] ?? 'tab-overview';
 $activeDiscSubTab = $_POST['disc_sub_tab'] ?? 'disc-view-products';
@@ -890,6 +989,11 @@ function saveTenantSetting(PDO $pdo, int $subId, string $key, string $val) {
 // ====================================================================
 if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     $act = $_POST['admin_action'];
+    // 🛡️ একই ফর্ম দ্বিতীয়বার (রিফ্রেশ/ডাবল ক্লিক) এলে কিছুই চলবে না
+    if (!vpFormOnceCheck()) {
+        $toast = ['type' => 'error', 'msg' => 'This form was already submitted — not applied again.'];
+        $act = '__duplicate__';
+    }
     $activeTab = $_POST['active_tab'] ?? 'tab-overview';
     if (!empty($_POST['disc_sub_tab'])) {
         $activeDiscSubTab = $_POST['disc_sub_tab'];
@@ -1001,7 +1105,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                         $stmtPlanIns = $pdo->prepare("INSERT INTO product_plans (product_id, duration_days, plan_title, reseller_price, user_price, regular_price, discount_percent, reseller_discount_percent, api_plan_id, reward_coins, coin_price, subdomain_id) VALUES (?, 30, ?, ?, ?, ?, 0.00, 0.00, ?, 0, 0, ?)");
                         $stmtPlanIns->execute([$prodId, $planTitle, $resellerPrice, $userPrice, $userPrice, $extId, $subadminTenantId]);
                     } else {
-                        $stmtPlanUp = $pdo->prepare("UPDATE product_plans SET plan_title = ?, reseller_price = ?, user_price = ?, regular_price = ? WHERE id = ? AND subdomain_id = ?");
+                        $stmtPlanUp = $pdo->prepare("UPDATE product_plans SET plan_title = ?, reseller_price = ?, user_price = ?, regular_price = ? WHERE id = ? AND subdomain_id = ?" . vpPlanLockSql($pdo));
                         $stmtPlanUp->execute([$planTitle, $resellerPrice, $userPrice, $userPrice, $planExists, $subadminTenantId]);
                     }
                     $syncedCount++;
@@ -1057,7 +1161,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
                             $stmtPlanIns = $pdo->prepare("INSERT INTO product_plans (product_id, duration_days, plan_title, reseller_price, user_price, regular_price, discount_percent, reseller_discount_percent, api_plan_id, reward_coins, coin_price, subdomain_id) VALUES (?, 30, ?, ?, ?, ?, 0.00, 0.00, ?, 0, 0, ?)");
                             $stmtPlanIns->execute([$prodId, $planTitle, $resellerPrice, $userPrice, $userPrice, $extId, $subadminTenantId]);
                         } else {
-                            $stmtPlanUp = $pdo->prepare("UPDATE product_plans SET plan_title = ?, reseller_price = ?, user_price = ?, regular_price = ? WHERE id = ? AND subdomain_id = ?");
+                            $stmtPlanUp = $pdo->prepare("UPDATE product_plans SET plan_title = ?, reseller_price = ?, user_price = ?, regular_price = ? WHERE id = ? AND subdomain_id = ?" . vpPlanLockSql($pdo));
                             $stmtPlanUp->execute([$planTitle, $resellerPrice, $userPrice, $userPrice, $planExists, $subadminTenantId]);
                         }
                         $syncedCount++;
@@ -1174,16 +1278,17 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
         } catch (Throwable $e) {}
 
             if (!empty($_POST['plan_user_price']) && is_array($_POST['plan_user_price'])) {
-                $upPlan = $pdo->prepare("UPDATE product_plans SET user_price = ?, regular_price = ?, reseller_price = ?, reward_coins = ?, coin_price = ? WHERE id = ? AND product_id = ? AND subdomain_id = ?");
+                // ✏️ প্ল্যানের নাম + Customer/Reseller দাম + Coins — শুধু এই স্টোরের প্ল্যানে সেভ
+                $planSaved = 0;
                 foreach ($_POST['plan_user_price'] as $planId => $uPrice) {
-                    $uP = max(0.01, (float)$uPrice);
-                    // রিসেলার প্রাইস ফাঁকা/না থাকলে আগের রিসেলার প্রাইস রাখা হবে (আগে প্রতি সেভে Customer এর 80% বসে যেত)
-                $rPRaw = trim((string)($_POST['plan_reseller_price'][$planId] ?? ''));
-                if (is_numeric($rPRaw) && (float)$rPRaw > 0) { $rP = round((float)$rPRaw, 2); }
-                else { $stOldR = $pdo->prepare("SELECT reseller_price FROM product_plans WHERE id = ? LIMIT 1"); $stOldR->execute([(int)$planId]); $rP = (float)($stOldR->fetchColumn() ?: 0); }
-                    $rCoins = isset($_POST['plan_reward_coins'][$planId]) ? max(0, (int)$_POST['plan_reward_coins'][$planId]) : 0;
-                    $cPrice = isset($_POST['plan_coin_price'][$planId]) ? max(0, (int)$_POST['plan_coin_price'][$planId]) : 0;
-                    $upPlan->execute([$uP, $uP, $rP, $rCoins, $cPrice, (int)$planId, $prodId, $subadminTenantId]);
+                    $ok = vpSavePlanRow($pdo, (int)$planId, (int)$prodId, (int)$subadminTenantId, [
+                        'title'      => $_POST['plan_title'][$planId] ?? null,
+                        'user'       => $uPrice,
+                        'reseller'   => $_POST['plan_reseller_price'][$planId] ?? null,
+                        'coins'      => $_POST['plan_reward_coins'][$planId] ?? null,
+                        'coin_price' => $_POST['plan_coin_price'][$planId] ?? null,
+                    ]);
+                    if ($ok) $planSaved++;
                 }
             }
             $toast = ['type' => 'success', 'msg' => 'Product updated successfully!'];
@@ -1287,8 +1392,10 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     if ($act === 'delete_coupon') {
         $cpId = (int)($_POST['coupon_id'] ?? 0);
         if ($cpId > 0) {
-            $pdo->prepare("DELETE FROM coupons WHERE id = ? AND subdomain_id = ?")->execute([$cpId, $subadminTenantId]);
-            try { $pdo->prepare("DELETE FROM coupon_usages WHERE coupon_id = ?")->execute([$cpId]); } catch (Throwable $e) {}
+            $stDelCp = $pdo->prepare("DELETE FROM coupons WHERE id = ? AND subdomain_id = ?");
+            $stDelCp->execute([$cpId, $subadminTenantId]);
+            // অন্য স্টোরের কুপন হলে কিছুই মুছবে না
+            if ($stDelCp->rowCount() > 0) { try { $pdo->prepare("DELETE FROM coupon_usages WHERE coupon_id = ?")->execute([$cpId]); } catch (Throwable $e) {} }
             $toast = ['type' => 'success', 'msg' => 'Coupon deleted!'];
         }
     }
@@ -1360,17 +1467,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['admin_action'])) {
     // 💲 QUICK PLAN PRICES (Products → প্রোডাক্টের ভেতরে Customer $ / Reseller $)
     if ($act === 'save_plan_prices_quick') {
         $prodId = (int)($_POST['product_id'] ?? 0);
-        $userPrices = $_POST['qp_user'] ?? []; $resPrices = $_POST['qp_res'] ?? [];
+        $userPrices = $_POST['qp_user'] ?? []; $resPrices = $_POST['qp_res'] ?? []; $titles = $_POST['qp_title'] ?? [];
         $cnt = 0;
         if ($prodId > 0 && is_array($userPrices)) {
-            $upQ = $pdo->prepare("UPDATE product_plans SET user_price = ?, regular_price = ?, reseller_price = ? WHERE id = ? AND product_id = ? AND subdomain_id = ?");
             foreach ($userPrices as $plId => $uRaw) {
-                if (!is_numeric($uRaw) || (float)$uRaw <= 0) continue;
-                $uP = round((float)$uRaw, 2);
-                $rRaw = trim((string)($resPrices[$plId] ?? ''));
-                $rP = (is_numeric($rRaw) && (float)$rRaw > 0) ? round((float)$rRaw, 2) : 0.00;
-                $upQ->execute([$uP, $uP, $rP, (int)$plId, $prodId, $subadminTenantId]);
-                $cnt++;
+                if (vpSavePlanRow($pdo, (int)$plId, $prodId, (int)$subadminTenantId, ['title' => $titles[$plId] ?? null, 'user' => $uRaw, 'reseller' => $resPrices[$plId] ?? null])) $cnt++;
             }
         }
         $toast = ['type' => 'success', 'msg' => "Prices saved for $cnt plan(s) — Customer & Reseller!"];
@@ -2110,26 +2211,22 @@ if (!function_exists('vpNormalizeTgLink')) {
         $toast = ['type' => 'success', 'msg' => "Notification deleted!"];
     }
 
-    if ($act === 'modify_balance') {
-        $userId = (int)$_POST['user_id'];
-        $amount = (float)$_POST['amount'];
-        if ($_POST['type'] === 'deduct') $amount = -$amount;
-        $pdo->prepare("UPDATE users SET balance = balance + ? WHERE id = ? AND subdomain_id = ?")->execute([$amount, $userId, $subadminTenantId]);
-        $toast = ['type' => 'success', 'msg' => "Balance updated!"];
-    }
-
-    if ($act === 'modify_coins') {
-        $userId = (int)$_POST['user_id'];
-        $amount = (int)$_POST['coins_amount'];
-        if ($_POST['type'] === 'deduct') $amount = -$amount;
-        $pdo->prepare("UPDATE users SET coins = GREATEST(0, coins + ?) WHERE id = ? AND subdomain_id = ?")->execute([$amount, $userId, $subadminTenantId]);
-        $toast = ['type' => 'success', 'msg' => "Coins updated!"];
+    if ($act === 'modify_balance' || $act === 'modify_coins') {
+        // 💰 Float/Coins: একবারই চলবে, ঠিক যতটা দেওয়া হয়েছে ততটাই যোগ/বিয়োগ; অ্যাকাউন্ট স্ট্যাটাস কখনো বদলাবে না
+        $wField = $act === 'modify_coins' ? 'coins' : 'balance';
+        $wMode  = (string)($_POST['type'] ?? '');
+        $wAmt   = (float)str_replace(',', '.', trim((string)($wField === 'coins' ? ($_POST['coins_amount'] ?? 0) : ($_POST['amount'] ?? 0))));
+        $wTok   = preg_match('/^[A-Za-z0-9_-]{16,64}$/', (string)($_POST['_vp_once'] ?? '')) ? (string)$_POST['_vp_once'] : '';
+        $wRes   = vpWalletAdjust($pdo, (int)($_POST['user_id'] ?? 0), (int)$subadminTenantId, $wField, $wAmt, $wMode, $wTok, (string)($_SESSION['subadmin_user'] ?? 'subadmin'));
+        $toast  = vpWalletToast($wRes, $wField, $wMode);
     }
 
     if ($act === 'toggle_ban') {
-        $userId = (int)$_POST['user_id'];
-        $newStatus = $_POST['status'] === 'active' ? 'banned' : 'active';
-        $pdo->prepare("UPDATE users SET status = ? WHERE id = ? AND subdomain_id = ?")->execute([$newStatus, $userId, $subadminTenantId]);
+        // স্ট্যাটাস শুধু এই বাটন থেকেই বদলায় (ব্যালেন্স অ্যাড/ডিডাক্টের সাথে কোনো সম্পর্ক নেই)
+        $userId = (int)($_POST['user_id'] ?? 0);
+        $curSt  = strtolower(trim((string)($_POST['status'] ?? 'active')));
+        $newStatus = in_array($curSt, ['banned', 'blocked', 'suspended', 'inactive', '0'], true) ? 'active' : 'banned';
+        $pdo->prepare("UPDATE users SET status = ? WHERE id = ? AND subdomain_id = ?")->execute([$newStatus, $userId, (int)$subadminTenantId]);
         $toast = ['type' => 'success', 'msg' => "Status changed to $newStatus!"];
     }
 
@@ -2186,7 +2283,7 @@ if (!function_exists('vpNormalizeTgLink')) {
         foreach ($customPrices as $plId => $cPrice) {
             $cleanPrice = trim((string)$cPrice);
             if ($cleanPrice !== '' && is_numeric($cleanPrice)) {
-                $insPrice->execute([$userId, (int)$plId, (float)$cleanPrice]);
+                vpInsertManualPrice($pdo, (int)$userId, (int)$plId, (float)$cleanPrice);
             }
         }
         $toast = ['type' => 'success', 'msg' => "Permissions saved!"];
@@ -2290,13 +2387,22 @@ if (!empty($productsData)) {
 }
 
 $userCustomPricesMap = [];
-$cPriceRows = $pdo->query("SELECT user_id, plan_id, custom_price FROM user_custom_prices")->fetchAll(PDO::FETCH_ASSOC);
+// 🔒 শুধু এই স্টোরের ইউজারদের হাতে বসানো দাম (অন্য ডোমেইনের ডাটা এখানে আসবে না)
+try {
+    $stCP = $pdo->prepare("SELECT ucp.user_id, ucp.plan_id, ucp.custom_price FROM user_custom_prices ucp JOIN users u ON u.id = ucp.user_id WHERE u.subdomain_id = ? AND ucp.is_manual = 1");
+    $stCP->execute([(int)$subadminTenantId]);
+    $cPriceRows = $stCP->fetchAll(PDO::FETCH_ASSOC);
+} catch (Throwable $e) {
+    $stCP = $pdo->prepare("SELECT ucp.user_id, ucp.plan_id, ucp.custom_price FROM user_custom_prices ucp JOIN users u ON u.id = ucp.user_id WHERE u.subdomain_id = ?");
+    $stCP->execute([(int)$subadminTenantId]);
+    $cPriceRows = $stCP->fetchAll(PDO::FETCH_ASSOC);
+}
 foreach ($cPriceRows as $cp) {
     $userCustomPricesMap[$cp['user_id']][$cp['plan_id']] = (float)$cp['custom_price'];
 }
 
 $userAllowedProdsMap = [];
-$aProdRows = $pdo->query("SELECT user_id, product_id FROM user_allowed_products")->fetchAll(PDO::FETCH_ASSOC);
+$stAP = $pdo->prepare("SELECT uap.user_id, uap.product_id FROM user_allowed_products uap JOIN users u ON u.id = uap.user_id WHERE u.subdomain_id = ?"); $stAP->execute([(int)$subadminTenantId]); $aProdRows = $stAP->fetchAll(PDO::FETCH_ASSOC);
 foreach ($aProdRows as $ap) {
     $userAllowedProdsMap[$ap['user_id']][] = (int)$ap['product_id'];
 }
@@ -3401,8 +3507,8 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                                         $plDisc = (float)($pl['discount_percent'] ?? 0);
                                     ?>
                                         <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 p-3 rounded-xl bg-slate-900/80 border border-slate-800/80 text-xs">
-                                            <div class="min-w-0">
-                                                <strong class="text-white"><?= htmlspecialchars($pl['plan_title']) ?></strong>
+                                            <div class="min-w-0 flex-1">
+                                                <input type="text" name="qp_title[<?= (int)$pl['id'] ?>]" value="<?= htmlspecialchars($pl['plan_title']) ?>" maxlength="100" placeholder="Plan name (e.g. 7 DAYS)" title="Plan name — customers & resellers will see this" class="w-full sm:max-w-[220px] bg-[#030612] border border-slate-700 focus:border-cyan-400 px-2 py-1 rounded-lg text-white font-bold text-xs outline-none">
                                                 <div class="flex items-center space-x-2 mt-1">
                                                     <span class="text-[10px] text-cyan-400 font-mono">KM ID: #<?= $pl['api_plan_id'] ?: 'None' ?></span>
                                                     <?php if ($plDisc > 0): ?>
@@ -3419,7 +3525,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                                             <div class="grid grid-cols-2 gap-2 sm:w-64 flex-shrink-0">
                                                 <label class="block">
                                                     <span class="text-[9px] text-cyan-300 font-bold block mb-0.5">👤 Customer $</span>
-                                                    <input type="number" step="0.01" min="0.01" name="qp_user[<?= (int)$pl['id'] ?>]" value="<?= number_format((float)$pl['user_price'], 2, '.', '') ?>" oninput="qpBdt(this)" data-rate="<?= (float)$effectiveBdtRate ?>" class="w-full bg-[#030612] border border-cyan-500/30 p-1.5 rounded-lg text-cyan-300 font-mono font-bold text-xs outline-none text-right">
+                                                    <input type="number" step="0.01" min="0.01" name="qp_user[<?= (int)$pl['id'] ?>]" value="<?= number_format((float)(((float)($pl['regular_price'] ?? 0) > 0) ? $pl['regular_price'] : $pl['user_price']), 2, '.', '') ?>" oninput="qpBdt(this)" data-rate="<?= (float)$effectiveBdtRate ?>" class="w-full bg-[#030612] border border-cyan-500/30 p-1.5 rounded-lg text-cyan-300 font-mono font-bold text-xs outline-none text-right">
                                                     <span class="qp-bdt text-[9px] text-slate-500 font-mono block text-right">≈ ৳<?= number_format($bdtP, 0) ?></span>
                                                 </label>
                                                 <label class="block">
@@ -6113,7 +6219,7 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
 
                     row.innerHTML = `
                         <div class="flex items-center justify-between">
-                            <strong class="text-white truncate text-xs">${pl.plan_title}</strong>
+                            <input type="text" name="plan_title[${pl.id}]" value="${String(pl.plan_title || '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;')}" maxlength="100" placeholder="Plan name (e.g. 7 DAYS)" class="flex-1 min-w-0 mr-2 bg-[#030612] border border-slate-700 focus:border-cyan-400 px-2 py-1 rounded-lg text-white font-bold text-xs outline-none">
                             <span class="text-[9px] text-slate-500 font-mono">KM ID #${pl.api_plan_id || 0}</span>
                         </div>
                         <div class="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-1 border-t border-slate-800/60">
@@ -6125,9 +6231,9 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
                             <div>
                                 <label class="text-[9px] text-cyan-300 block font-bold">👤 Customer $</label>
                                 <div class="flex items-center space-x-1 mt-0.5">
-                                    <input type="number" step="0.01" name="plan_user_price[${pl.id}]" value="${parseFloat(pl.user_price).toFixed(2)}" class="w-full bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-emerald-400 font-mono font-bold text-xs outline-none">
+                                    <input type="number" step="0.01" name="plan_user_price[${pl.id}]" value="${(parseFloat(pl.regular_price) > 0 ? parseFloat(pl.regular_price) : parseFloat(pl.user_price)).toFixed(2)}" class="w-full bg-[#030612] border border-slate-800 p-1.5 rounded-lg text-emerald-400 font-mono font-bold text-xs outline-none">
                                 </div>
-                                <span class="text-[9px] text-slate-500 font-mono">≈ ৳${bdt} BDT</span>
+                                <span class="text-[9px] text-slate-500 font-mono">${parseFloat(pl.discount_percent) > 0 ? `${parseFloat(pl.discount_percent)}% OFF → sells ৳${bdt}` : `≈ ৳${bdt} BDT`}</span>
                             </div>
                             <div>
                                 <label class="text-[9px] text-amber-400 block font-bold">🪙 Gift Coins</label>
@@ -6225,6 +6331,8 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             document.getElementById('balanceModalUserId').value = id;
             document.getElementById('coinsModalUserId').value = id;
             document.getElementById('banModalUserId').value = id;
+            // স্ট্যাটাস শুধু banned/blocked/suspended/inactive হলেই বন্ধ ধরা হবে; বাকি সব Active
+            status = ['banned', 'blocked', 'suspended', 'inactive', '0'].includes(String(status || 'active').toLowerCase().trim()) ? 'banned' : 'active';
             document.getElementById('banModalStatus').value = status;
             document.getElementById('balanceModalUsername').innerText = username;
             document.getElementById('balanceModalCurrent').innerText = '$' + parseFloat(balance).toFixed(2);
@@ -6342,5 +6450,41 @@ $panelTitle = !empty($settings['site_name']) ? $settings['site_name'] : 'Sub-Adm
             <?php endif; ?>
         });
     </script>
+<script>
+/* 🛡️ প্রতিটা ফর্ম একবারই জমা হবে: one-time token + ডাবল-ট্যাপ গার্ড + Enter চাপলে ভুল করে Add হবে না */
+(function () {
+    function vpTok() {
+        try { const a = new Uint8Array(16); crypto.getRandomValues(a); return Array.from(a, b => b.toString(16).padStart(2, '0')).join(''); }
+        catch (e) { return (Date.now().toString(36) + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2)).slice(0, 32).padEnd(20, 'x'); }
+    }
+    function arm(f) {
+        if (!f || String(f.method || '').toLowerCase() !== 'post') return;
+        let i = f.querySelector('input[name="_vp_once"]');
+        if (!i) { i = document.createElement('input'); i.type = 'hidden'; i.name = '_vp_once'; f.appendChild(i); }
+        i.value = vpTok();
+    }
+    function armAll() { document.querySelectorAll('form').forEach(arm); }
+    document.addEventListener('DOMContentLoaded', armAll);
+    window.addEventListener('pageshow', armAll); // ব্যাক বাটনে ফিরে এলে নতুন টোকেন
+    // ১) ক্যাপচার: ৪ সেকেন্ডের মধ্যে একই ফর্ম আবার জমা হলে আটকাও (ডাবল-ট্যাপ)
+    document.addEventListener('submit', function (e) {
+        const f = e.target; if (!f || String(f.method || '').toLowerCase() !== 'post') return;
+        if (f.dataset.vpSentAt && Date.now() - (+f.dataset.vpSentAt) < 4000) { e.preventDefault(); e.stopImmediatePropagation(); }
+    }, true);
+    // ২) বাবল: confirm() ইত্যাদি শেষ হওয়ার পর — আসলেই জমা হলে মার্ক করো; AJAX/ক্যানসেল হলে পরের বারের জন্য নতুন টোকেন
+    document.addEventListener('submit', function (e) {
+        const f = e.target; if (!f || String(f.method || '').toLowerCase() !== 'post') return;
+        if (e.defaultPrevented) { setTimeout(function () { arm(f); }, 0); return; }
+        f.dataset.vpSentAt = String(Date.now());
+        setTimeout(function () { arm(f); }, 0); // পাঠানো ডাটা আগেই তৈরি — পরের সাবমিটের জন্য নতুন টোকেন
+    }, false);
+    // Add/Deduct ফর্মে Enter চাপলে কিছু হবে না — বাটনে চাপতে হবে (আগে Enter = সবসময় Add হত)
+    document.addEventListener('keydown', function (e) {
+        if (e.key !== 'Enter' || !e.target || e.target.tagName !== 'INPUT') return;
+        const f = e.target.form;
+        if (f && f.querySelectorAll('button[type="submit"][name="type"]').length > 1) e.preventDefault();
+    }, true);
+})();
+</script>
 </body>
 </html>

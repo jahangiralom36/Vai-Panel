@@ -448,9 +448,27 @@ CREATE TABLE IF NOT EXISTS `user_custom_prices` (
   `user_id` int(11) NOT NULL,
   `plan_id` int(11) NOT NULL,
   `custom_price` decimal(10,2) NOT NULL,
+  `is_manual` tinyint(1) NOT NULL DEFAULT 0,
   `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (`id`),
   KEY `idx_user_plan` (`user_id`,`plan_id`)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
+
+-- 💰 অ্যাডমিন Float/Coins অ্যাড-ডিডাক্ট লগ (প্রতিটা রিকোয়েস্ট একবারই চলবে — request_token UNIQUE)
+CREATE TABLE IF NOT EXISTS `wallet_adjust_logs` (
+  `id` int(11) NOT NULL AUTO_INCREMENT,
+  `subdomain_id` int(11) NOT NULL DEFAULT 0,
+  `user_id` int(11) NOT NULL,
+  `admin_name` varchar(100) DEFAULT NULL,
+  `field` varchar(10) NOT NULL DEFAULT 'balance',
+  `change_amount` decimal(14,4) NOT NULL DEFAULT 0.0000,
+  `before_value` decimal(14,4) NOT NULL DEFAULT 0.0000,
+  `after_value` decimal(14,4) NOT NULL DEFAULT 0.0000,
+  `request_token` varchar(64) NOT NULL,
+  `created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (`id`),
+  UNIQUE KEY `uniq_request_token` (`request_token`),
+  KEY `idx_sub_user` (`subdomain_id`,`user_id`)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_general_ci;
 
 CREATE TABLE IF NOT EXISTS `user_spin_offers` (
@@ -846,6 +864,10 @@ CALL vp_add_column('user_custom_prices', 'user_id', '`user_id` int(11) NOT NULL'
 CALL vp_add_column('user_custom_prices', 'plan_id', '`plan_id` int(11) NOT NULL');
 CALL vp_add_column('user_custom_prices', 'custom_price', '`custom_price` decimal(10,2) NOT NULL');
 CALL vp_add_column('user_custom_prices', 'created_at', '`created_at` timestamp NULL DEFAULT CURRENT_TIMESTAMP');
+-- is_manual = 1: অ্যাডমিনের হাতে বসানো দাম; 0 = পুরনো অটো-হিসাব (স্টোর এখন লাইভ হিসাব করে, তাই এগুলো আর ব্যবহার হয় না)
+-- price_locked = 1: অ্যাডমিন হাতে দাম/নাম বদলেছে → Key Manager সিঙ্ক আর ওভাররাইট করবে না
+CALL vp_add_column('product_plans', 'price_locked', '`price_locked` tinyint(1) NOT NULL DEFAULT 0');
+CALL vp_add_column('user_custom_prices', 'is_manual', '`is_manual` tinyint(1) NOT NULL DEFAULT 0');
 
 -- user_spin_offers
 CALL vp_add_column('user_spin_offers', 'user_id', '`user_id` int(11) NOT NULL');
